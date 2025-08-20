@@ -2,8 +2,8 @@ from typing import Any
 
 import numpy as np
 
-from src import Train
-from src import OESD
+from src.train import Train
+from src.oesd import OESD
 
 # case information titles # 10111020
 SECTIONS: list[list[tuple[float, float]]] = [
@@ -29,7 +29,7 @@ OESDS: list[str] = ["None", "supercapacitor", "Li-ion", "flywheel"]
 VARPI_0s: list[float] = [0.6, 1.0]
 NUM_INTERVALS: list[int] = [25, 50, 100, 103, 200, 500]  # >100就会遇到infeasible问题
 DIRECTIONS: list[tuple[bool, bool]] = [(True, False), (False, True), (True, True)]  # (l2r, r2l)
-SECTION_TIMES: list[tuple[float, float]] = [(98, 108), (98, 118), (98, 128), (98, 138)]
+SECTION_TIMES: list[tuple[float, float]] = [(98, 108), (98, 118), (98, 128), (98, 138), (98, 180)]
 
 # technical parameters
 I_MIN, I_MAX = 0.002, 0.03  # min max gradient

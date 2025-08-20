@@ -49,9 +49,9 @@ class OESD:
             The type of the OESD. Should be either "Li-ion", "supercapacitor", or "flywheel".
         """
         self.type = type_
-        data_public: dict = json.load(open(f"..\\data\\OESD\\OESDPublic.json", "r", encoding="utf-8"))
+        data_public: dict = json.load(open(f"data/OESD/OESDPublic.json", "r", encoding="utf-8"))
         try:
-            oesd_data = json.load(open(f"..\\data\\OESD\\{type_}.json", 'r', encoding="utf-8"))
+            oesd_data = json.load(open(f"data/OESD/{type_}.json", 'r', encoding="utf-8"))
             self.data: dict = oesd_data
             self.data.update(data_public)
         except FileNotFoundError:

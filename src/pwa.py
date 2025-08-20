@@ -72,7 +72,7 @@ def plot_approximation_with_previous_studies(
 
     plt.show()
     if input("Save plot? (y/n):\n") == "y":
-        fig.savefig(fr"..\\pic\\{plot_name}", dpi=600)
+        fig.savefig(fr"pic/{plot_name}", dpi=600)
     return
 
 
@@ -199,7 +199,7 @@ def plot_supercapacitor():
 
     plt.show()
     if input("Save plot? (y/n):\n") == "y":
-        fig.savefig(fr"..\\pic\\supercapacitor_PWA.pdf", dpi=600)
+        fig.savefig(fr"pic/supercapacitor_PWA.pdf", dpi=600)
     return
 
 
@@ -229,7 +229,7 @@ def plot_flywheel():
 
     plt.show()
     if input("Save plot? (y/n):\n") == "y":
-        fig.savefig(fr"..\\pic\\flywheel_PWA.pdf", dpi=600)
+        fig.savefig(fr"pic/flywheel_PWA.pdf", dpi=600)
     return
 
 
@@ -280,7 +280,7 @@ def plot_li():
 
     plt.show()
     if input("Save plot? (y/n):\n") == "y":
-        fig.savefig(fr"..\\pic\\Li-ion_PWA.pdf", dpi=600)
+        fig.savefig(fr"pic/Li-ion_PWA.pdf", dpi=600)
     return
 
 

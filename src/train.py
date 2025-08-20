@@ -54,8 +54,8 @@ class Train:
             The average weight per person in kilograms. Default is 68 kg.
         """
         self.type: str = type_
-        data_public = json.load(open("..\\data\\train\\TrainPublic.json", "r", encoding="utf-8"))
-        self.data = json.load(open(f'..\\data\\train\\{type_}.json', "r", encoding="utf-8"))
+        data_public = json.load(open("data/train/TrainPublic.json", "r", encoding="utf-8"))
+        self.data = json.load(open(f'data/train/{type_}.json', "r", encoding="utf-8"))
         self.data.update(data_public)
         self.data['mass'] += (load_spd * self.data['area'] * weight_per_person_kg) / 1000  # from kg to t
         self.data['load_spd'] = load_spd

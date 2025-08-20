@@ -214,7 +214,7 @@ def interpolate_envelope(envelope: np.array) -> np.ndarray:
 class Ground:
     def __init__(self, name: str, type_: str = "random") -> None:
         self.name: str = name
-        data = read_data(f"..\\data\\ground\\{type_}_ground_data.json")[name]
+        data = read_data(f"data/ground/{type_}_ground_data.json")[name]
         self.data: dict[str, Any] = data
 
         self.ds: float = data['ds']
@@ -265,7 +265,7 @@ class Ground:
             )
             return points
         if "point_arr_file" in self.data:
-            points = read_data(f"ground_data\\{self.data['point_arr_file']}").values
+            points = read_data(f"ground_data/{self.data['point_arr_file']}").values
             return points
 
     def generate_point_index(self) -> np.ndarray:

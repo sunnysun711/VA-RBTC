@@ -1,8 +1,8 @@
 import json
-from src import get_case
+from src.prepare import get_case
 
 
-def anl_results(case_id: int, folder: str = r"..\result\0617") -> dict | None:
+def anl_results(case_id: int, folder: str = "result/0617") -> dict | None:
     """
     Load the optimization results from a JSON file.
 
@@ -11,12 +11,12 @@ def anl_results(case_id: int, folder: str = r"..\result\0617") -> dict | None:
 
     Args:
         case_id (int): The ID of the case for which the results are to be loaded.
-        folder (str, optional): The directory where the results file is located. Defaults to "..\\result\\0617".
+        folder (str, optional): The directory where the results file is located. Defaults to "result/0617".
 
     Returns:
         dict: A dictionary containing the optimization results.
     """
-    file = f"{folder}\\{case_id}.json"
+    file = f"{folder}/{case_id}.json"
     try:
         res: dict = json.load(open(file, "r", encoding="utf-8"))
         return res
@@ -52,7 +52,7 @@ def anl_solution_info(opt_results: dict) -> dict:
     return opt_results["SolutionInfo"]
 
 
-def anl_one_case(case_id: int, folder: str = r"..\\result\\0617") -> dict:
+def anl_one_case(case_id: int, folder: str = "result/0617") -> dict:
     # Status, Runtime, ObjVal, MIPGap,
     # total_net_energy, total_oesd_energy, total_oesd_energy_charged,
     # varpi_fnished, travel_time
@@ -79,6 +79,8 @@ def anl_one_case(case_id: int, folder: str = r"..\\result\\0617") -> dict:
     xi_r2l = anl_variables("R2L_xi", case_result)
     varpi_r2l = anl_variables("R2L_varpi", case_result)
     t_r2l = anl_variables("R2L_t", case_result)
+    
+    e = anl_variables("e", case_result)
 
     full_info = {
         "case_id": case_id,
@@ -101,6 +103,7 @@ def anl_one_case(case_id: int, folder: str = r"..\\result\\0617") -> dict:
         "T_r2l": sum(t_r2l.values()),
         "varpi_left_l2r": 0,
         "varpi_left_r2l": 0,
+        "e_min": min(e.values()),
     }
     if case_info['oesd'].type is not None:
         if case_info['direction'][0]:

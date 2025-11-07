@@ -1,6 +1,6 @@
 # Code Repository for Paper: VA-RBTC
 
-Welcome to the code repository for the ongoing paper titled *Energy-saving Design of Underground Metro Vertical Alignment Considering Train Control with Onboard Energy Storage Devices*. This research is intended for potential publication in *Tunnelling and Underground Space Technology* (incorporating Trenchless Technology Research).
+Welcome to the code repository for the ongoing paper titled *Redesigning Metro Vertical Alignment: Balancing Safety and Energy Efficiency via Energy Storage*. 
 
 This repository contains an optimization framework for designing energy-efficient metro vertical alignments while considering regenerative braking train control (RBTC) and onboard energy storage devices (OESD). The framework uses Gurobi optimization to solve the integrated design problem.
 All code is made available under the MIT License.

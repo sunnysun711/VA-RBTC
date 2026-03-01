@@ -1,181 +1,101 @@
 # Code Repository for Paper: VA-RBTC
 
-Welcome to the code repository for the ongoing paper titled *Redesigning Metro Vertical Alignment: Balancing Safety and Energy Efficiency via Energy Storage*. 
+Welcome to the code repository for the ongoing paper titled *Battery as a lifter: Decoupling energy efficiency from deep tunneling in metro vertical alignment*. The goal of this project is to jointly optimize underground metro track vertical alignment and train control to minimize energy consumption, with optional Pareto analysis trading off alignment depth vs. energy. All code is made available under the MIT License.
 
-This repository contains an optimization framework for designing energy-efficient metro vertical alignments while considering regenerative braking train control (RBTC) and onboard energy storage devices (OESD). The framework uses Gurobi optimization to solve the integrated design problem.
-All code is made available under the MIT License.
+The solver backend is **Gurobi** (v12). A valid Gurobi license is required to run any optimization.
 
-## Prerequisites
-- Python 3.8+
-- Gurobi optimizer (with valid license)
-- Required packages:
-  ```bash
-  pip install gurobipy numpy pandas matplotlib pwlf
-  ```
+## Environment
 
-## Repository Structure
+- Python 3.12, Gurobi 12.0.1
+- Install dependencies: `pip install -r requirements.txt`
+- All scripts must be run from the **project root** (not from `src/`), as file paths like `data/OESD/...` and `result/...` are relative to root.
 
+## Running the Code
+
+Run a single case optimization (from project root):
 ```bash
-src/
-├── optimize.py      # Main optimization model class
-├── opt_model.py     # Model building functions (VA, RBTC, OESD, constraints)
-├── opt_ws.py        # Warm start solution generation
-├── opt_utils.py     # Optimization utilities
-├── prepare.py       # Case preparation and configuration
-├── train.py         # Train class and data
-├── oesd.py          # OESD class and characteristics
-├── analyze.py       # Results analysis functions
-├── plot.py          # Visualization functions
-└── pwa.py           # Piecewise linear approximation utilities
-
-data/
-├── train/          # Train configuration files
-└── OESD/           # OESD specification files
+python src/model_full.py      # runs case 10030222 with depth_cap demo
+python src/pareto.py          # runs Pareto sweep for multiple cases
+python src/plot.py            # plots compact result for a saved .sol file
 ```
 
-## Quick Start
-
-```python
-from src.optimize import VA_RBTC_OESD
-
-# Create optimization model with case ID
-model = VA_RBTC_OESD(case_id=10030222, save_dir="results")
-
-# Build model with default settings
-model.build(
-    va_solution: dict | None = None,      # if VA fixed, provide the solution
-    EC_on: bool = True,                   # Elevation-based cuts
-    TC_on: bool = True,                   # Time-based cuts
-    SC_on: bool = True,                   # Slope-based cuts
-    FC_on: bool = True,                   # Force-based cuts (not used in this paper)
-    VC_on: bool = True,                   # Velocity-based cuts (not used in this paper)
-    MS_on: bool = True,                   # Mode-switching cuts (not used in this paper)
-    obj_net: bool = False,                # Optimize total energy (net + OESD) or net energy
-    with_nonlinear_t: bool = False,       # use gurobi's embedded nonlinear method for time variable
-    use_warm_start: bool = True,          # Implement warm-start pipeline
-    lift_va: bool | float | int = True,   # Use VA sweep for warm start
-    debug_mode: bool = False,             # Extensive log info and test warm-start solution feasibility with locked variables
-    opt_depth: bool = False,              # Change objective to lifting VA depth (very difficult to solve)
-    energy_cap: float | None = None,      # Energy upper bound, should be the objVal of basedline model 
-    pareto_alpha: float | None = None,    # NOT USED FOR NOW
-)
-
-# Optimize with time limit
-model.optimize_(save_on=True, MIPGap=0.01, TimeLimit=300, **Gurobi_parameters)
-
+Run Jupyter notebooks for analysis:
+```bash
+jupyter notebook scripts/
 ```
 
-## Case id systems
+## Case ID Encoding
 
-Case ID System
-The 8-digit case ID encodes problem parameters:
+A case is fully identified by an 8-digit integer (e.g., `10030222`). Each digit encodes a parameter:
 
-- Digit 1: Section ID (1-3)
-- Digit 2: Train type (0-2)
-  - 0: Wu2021Train
-  - 1: Wu2024Train
-  - 2: Scheepmaker2020
-- Digit 3: Train load (0-3, passengers/m²)
-  - 0: No load
-  - 1: 3 passengers/m²
-  - 2: 6 passengers/m²
-  - 3: 9 passengers/m²
-- Digit 4: OESD type (0: None, 1: Supercapacitor, 2: Li-ion, 3: Flywheel)
-- Digit 5: Initial SOE (0: 60%, 1: 100%)
-- Digit 6: Number of intervals (0: 25, 1: 50, 2: 100, etc.)
-- Digit 7: Direction (0: L→R, 1: R→L, 2: Both)
-- Digit 8: Section time range index
-  - (98, 108)  # very likely to be infeasible
-  - (98, 118)
-  - (98, 128)
-  - (98, 138)
-  - (98, 180)
+| Digit position | Parameter | Lookup list in `prepare.py` |
+|---|---|---|
+| 0 | `section_id` (1–3) | `SECTIONS` |
+| 1 | `train_id` | `TRAINS` |
+| 2 | `train_load_id` | `TRAIN_LOADS` |
+| 3 | `oesd_id` | `OESDS` |
+| 4 | `varpi_0_id` | `VARPI_0s` |
+| 5 | `S_id` (num intervals) | `NUM_INTERVALS` |
+| 6 | `direction_id` | `DIRECTIONS` |
+| 7 | `section_time_id` | `SECTION_TIMES` |
 
-Example: 10020222 means Section 1, Wu2021Train, no load, Li-ion battery, 60% initial SOE, 100 intervals, both directions, time range (98, 128).
+To add new parameter variants, append to the corresponding list in `src/prepare.py`. **Changing `SECTION_TIMES` shifts all section_time_id mappings** — existing result directories are named by case_id only, so re-running with modified lists may mismatch saved results.
 
-## Modules
+## Architecture
 
-### `optimize.py` - Main optimization model
+### Data flow
 
-Contains the `VA_RBTC_OESD` class which is the main optimization model for Vertical Alignment, Regenerative Braking Train Control, and Onboard Energy Storage Devices. This is an inherited class of `gurobipy.Model`, so all methods like `.getVars()`, `.Status`, `.getObjVal()`, etc. are available.
-
-Key methods:
-- `__init__(self, case_id:int, save_dir:str|None=None)`: Initialize the optimization model with case ID and optional save directory.
-- 
-- `build(self)`: Use either fixed VA solution or build the optimization model.
-- `optimize_(self, save_on:bool=True, MIPGap:float=0.01, TimeLimit:int=300, **Gurobi_parameters)`: Optimize the model with specified parameters. 
-
-Attributes:
-- case: dict, the case parameters
-- train: Train object
-- oesd: OESD object
-- va_variables: dict, the vertical alignment variables
-- rbtc_variables: dict, the regenerative braking train control variables
-- oesd_variables: dict, the onboard energy storage device variables
-
-
-### `opt_model.py` - Optimization model
-
-Contains all mathemetical models for the optimization problem.
-
-- `model_va()`: Vertical alignment model
-- `model_rbtc()`: Regenerative braking train control model
-- `model_oesd()`: Onboard energy storage device model
-- `solve_edge_va()`: Solve the vertical alignment model for the edge case (min/max sum of e)
-- `model_EC()`: Elevation-based cuts
-- `model_TC()`: Time-based cuts
-- `model_SC()`: Slope-based cuts
-- `model_FC()`: Force-based cuts (not used in this paper)
-- `model_VC()`: Velocity-based cuts (not used in this paper)
-- `model_MS()`: Mode-switching cuts (not used in this paper)
-
-### `opt_ws.py` - warm-start pipeline
-
-```python
-# Generate single warm start solution
-from src.opt_ws import gen_warm_start_sol
-
-ws_solution = gen_warm_start_sol(
-    case: dict,
-    use_running_time_exhaustive: bool = True,
-    lift_va: bool | float = False,  # False: lowest VA, True: sweep, float: fixed lift
-    delta_e_lift: float = 0.5,      # Lift amount if lift_va is True
-    tighten_energy: bool = True,    # Additional energy optimization
-    obj_net: bool = True
-)
-
-# Run VA floor sweep to find best warm start
-from src.opt_ws import run_va_floor_sweep, SweepConfig
-
-config = SweepConfig(
-    delta_e_step=0.2,    # Step size for lifting VA
-    rounds=25,           # Number of sweep rounds
-    early_stop_tol=0.0,  # Early stopping tolerance
-)
-
-best_sol, best_obj, best_delta, history, info = run_va_floor_sweep(
-    case: dict,
-    obj_net: bool,
-    cfg: config
-)
+```
+data/train/*.json + data/OESD/*.json
+         ↓
+   src/prepare.py :: get_case(case_id) → case dict
+         ↓
+   src/model_core.py :: model_va / model_rbtc / model_oesd / [cut functions]
+         ↓
+   src/model_full.py :: FullModel(gp.Model) + Solution
+         ↓
+   src/pareto.py :: pareto_sweep → ParetoPoint list → CSV + PDF
+   src/plot.py   :: plot_compact(case, sol) → matplotlib Figure
+         ↓
+   result/<save_dir>/<case_id>.{log,sol,json}
 ```
 
-### `analyze.py` - Analysis tools for the saved .json files
+### Key modules
 
-```python
-from src.analyze import anl_results, anl_variables, anl_one_case
+**`src/prepare.py`** — Decodes case_id into a `case` dict containing all physical parameters (geometry, train specs, OESD specs, time bounds). `get_case()` is the single entry point used everywhere.
 
-# Load optimization results
-results = anl_results(case_id=10030222, folder="results")
+**`src/model_core.py`** — Pure Gurobi model-building functions; no solving here:
+- `model_va` — vertical alignment (VA) MIP: elevation variables `e[s]`, slope binary `pi[s]`
+- `model_rbtc` — regenerative braking train control (RBTC): per-interval velocity, force, energy, time; supports `l2r` (left-to-right) and `r2l` directions; variables prefixed `L2R_` or `R2L_`
+- `model_oesd` — onboard energy storage (OESD): SOE `varpi`, charge/discharge power `kappa_plus/minus`, energy `xi`
+- Cut functions (`model_EC`, `model_SC`, `model_TC`, `model_FC`, `model_VC`, `model_MS`) — valid inequalities / logic cuts to tighten the relaxation; all enabled by default in `FullModel.build()`
 
-# Extract specific variables
-elevations = anl_variables("e", results)
-speeds_l2r = anl_variables("L2R_v", results)
+**`src/model_full.py`** — `FullModel(gp.Model)` orchestrates build → warm start → solve → save:
+- `build()` assembles all sub-models and cuts, sets objective
+- `reconfigure()` swaps objective/caps without rebuilding (used in Pareto sweep)
+- `get_sequential_solution()` — 3-stage sequential heuristic (VA → RBTC → OESD) for warm start
+- `inject_warm_start()` — injects solution as MIP start hints (`VarHintVal`) or hard starts (`Start`)
+- `optimize_()` — wraps `optimize()` with log/solution file saving; writes `.log`, `.sol`, `.json` to `result/<save_dir>/`
+- `Solution` dataclass — holds `va_sol`, `rbtc_sol`, `oesd_sol` dicts; can be constructed from a live model or loaded from `.sol`/`.json` files
 
-# Get comprehensive case analysis
-case_info = anl_one_case(case_id=10030222, folder="results")
-# Returns: train type, OESD type, energy consumption, runtime, gap, etc.
-```
+**`src/pareto.py`** — ε-constraint Pareto sweep over alignment depth:
+- Builds model once, then `reconfigure()` per step (efficient)
+- Warm-starts each step from previous solution; step 0 uses `get_sequential_solution()`
+- Saves per-step results under `result/<save_dir>/step{i:03d}_depth{d:.2f}/`
+- Exports `pareto_results.csv` and two PDF plots per sweep
+
+**`src/plot.py`** — `plot_compact(case, sol, l2r)` produces a 3-or-4-panel figure (elevation+speed, force+time, cumulative energy, SOE)
+
+### Result files
+
+Each solved case writes to `result/<save_dir>/<case_id>.{log,sol,json}`:
+- `.log` — Gurobi solver log + case quick-text + detailed variable/constraint dump
+- `.sol` — Gurobi solution file (variable name → value, space-separated)
+- `.json` — Gurobi JSON solution (array of `{VarName, X}`)
+
+## Objective and Constraints
+
+The optimization jointly minimizes total traction energy (net + OESD losses). The Pareto sweep uses an ε-constraint on `depth_cap` (max track depth below lower platform elevation) to trace the energy–depth frontier. The `is_oesd_included` flag controls whether OESD energy flows enter the objective.
 
 ## Citation
 

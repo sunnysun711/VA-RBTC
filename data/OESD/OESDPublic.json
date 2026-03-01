@@ -1,0 +1,4 @@
+{
+    "investment": 150,
+    "comment": "investment表示电池投资（单位k$）。charge和discharge表示线性近似分段点，x的单位是100%，y的单位是kW。mass表示电池重量，单位t。capacity表示电池容量，单位kWh"
+}

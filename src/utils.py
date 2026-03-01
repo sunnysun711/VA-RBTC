@@ -78,3 +78,43 @@ def log_timing(
         info_txt = f"[INFO] {operation} completed in {duration:.3f} seconds"
         print(info_txt)
     return info_txt
+
+
+
+def anl_variables(var_name: str, opt_results: dict) -> dict:
+    """
+    Extract the values of a specific variable from the optimization results.
+
+    This function extracts the values of a specified variable from the optimization results
+    and returns them as a dictionary indexed by the variable indices.
+
+    Args:
+        var_name (str): The name of the variable to extract.
+        opt_results (dict): The dictionary read from the result json file.
+
+    Returns:
+        dict: A dictionary containing the values of the specified variable, indexed by their indices.
+    """
+    values: dict = {}
+    for var in opt_results["Vars"]:
+        var_name = var["VarName"]
+        if var_name.startswith(var_name + "["):
+            index = int(var_name.split("[")[1].split("]")[0])
+            values[index] = var["X"]
+    return values
+
+
+
+def set_times_style():
+    import matplotlib
+    params = {
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "DejaVu Serif"],  # 回退字体
+        "mathtext.fontset": "stix",   # 数学符号用 STIX（Times 风格）
+        "axes.labelsize": 10,
+        "axes.titlesize": 10,
+        "legend.fontsize": 10,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+    }
+    matplotlib.rcParams.update(params)

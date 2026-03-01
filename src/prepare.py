@@ -1,9 +1,7 @@
 from typing import Any
+import json
 
 import numpy as np
-
-from src.train import Train
-from src.oesd import OESD
 
 # case information titles # 10111020
 SECTIONS: list[list[tuple[float, float]]] = [
@@ -25,17 +23,47 @@ SECTIONS: list[list[tuple[float, float]]] = [
 ]
 TRAINS: list[str] = ["Wu2021Train", "Wu2024Train", "Scheepmaker2020"]
 TRAIN_LOADS: list[int] = [0, 3, 6, 9]  # number of passengers per square meter.
-OESDS: list[str] = ["None", "supercapacitor", "Li-ion", "flywheel"]
+OESDS: list[str] = ["None", "supercapacitor", "Li-ion", "flywheel", "catenary"]
 VARPI_0s: list[float] = [0.6, 1.0]
-NUM_INTERVALS: list[int] = [25, 50, 100, 103, 200, 500]  # >100就会遇到infeasible问题
+NUM_INTERVALS: list[int] = [25, 50, 100, 103, 200, 500]
 DIRECTIONS: list[tuple[bool, bool]] = [(True, False), (False, True), (True, True)]  # (l2r, r2l)
-SECTION_TIMES: list[tuple[float, float]] = [(98, 108), (98, 118), (98, 128), (98, 138), (98, 180)]
+SECTION_TIMES: list[tuple[float, float]] = [(98, 108), (98, 118), (98, 128), (98, 138), (98, 148), (98, 158), (98, 168)]
 
 # technical parameters
 I_MIN, I_MAX = 0.002, 0.03  # min max gradient
 DELTA_G = 0.018  # max gradient difference
 MIN_SLOPE_LEN = 200
-WEIGHT_PER_PERSON_KG = 68  # kg
+
+class OESD:
+    def __init__(self, type_: str):
+        self.type = type_
+        data_public: dict = json.load(open(f"data/OESD/OESDPublic.json", "r", encoding="utf-8"))
+        try:
+            oesd_data = json.load(open(f"data/OESD/{type_}.json", 'r', encoding="utf-8"))
+            self.data: dict = oesd_data
+            self.data.update(data_public)
+        except FileNotFoundError:
+            print(f"OESD '{type_}' not found!")
+            self.data: dict = {"mass": 0}
+            self.type = None
+
+class Train:
+    def __init__(self, type_: str, load_spd: float = 0, weight_per_person_kg: float = 68):
+        """
+        :param type_: str
+            The type of the train, used to load specific data from JSON files.
+        :param load_spd: float, optional
+            The loaded standing passenger density (number of passengers per square meter). Default is 0.
+        :param weight_per_person_kg: float, optional
+            The average weight per person in kilograms. Default is 68 kg.
+        """
+        self.type: str = type_
+        data_public = json.load(open("data/train/TrainPublic.json", "r", encoding="utf-8"))
+        self.data = json.load(open(f'data/train/{type_}.json', "r", encoding="utf-8"))
+        self.data.update(data_public)
+        self.data['mass'] += (load_spd * self.data['area'] * weight_per_person_kg) / 1000  # from kg to t
+        self.data['load_spd'] = load_spd
+        self.data['weight_per_person_kg'] = weight_per_person_kg
 
 
 def get_case(case_id: int):
@@ -58,7 +86,7 @@ def get_case(case_id: int):
     # processing raw data
     S1, P1, P2, S2 = SECTIONS[section_id - 1]
     train_type, load = TRAINS[train_id], TRAIN_LOADS[train_load_id]
-    TRAIN = Train(train_type, load_spd=load, weight_per_person_kg=WEIGHT_PER_PERSON_KG)
+    TRAIN = Train(train_type, load_spd=load)
     oesd_type = OESDS[oesd_id]
     OB = OESD(oesd_type)
     S_ = NUM_INTERVALS[S_id]

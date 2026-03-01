@@ -1,3 +1,5 @@
+from typing import Optional
+
 import gurobipy as gp
 from gurobipy import GRB
 import numpy as np
@@ -5,109 +7,43 @@ import numpy as np
 
 def model_va(
     m: gp.Model,
-    case: dict | None = None,
-    va_solution: dict | None = None,
-    e_floor: float | None = None,
+    case: dict,
+    va_solution: Optional[dict] = None,
 ) -> dict[str, gp.tupledict]:
     """
     Build the vertical alignment (VA) model for the given case.
 
     :param gp.Model m: The model instance to which the VA constraints and variables will be added. 
-                       Should be a `VA_RBTC_OESD` object.
-    :param dict, optional case: A dictionary containing case-specific parameters, used to create LC. If None, the
-                                case details from the model instance `m` will be used.
+    :param dict case: A dictionary containing case-specific parameters, used to create LC.
     :param dict, optional va_solution: A dictionary containing solution variables 'e' with keys from 1 to S_+1.
                                        If provided, only e will be modeled.
-    :param float | None, optional e_floor: Additional lower bounds for all elevations. 
 
     :return: A dictionary of variables of VA model. 
              The keys are variable names, and the values are tupledicts of variables.
-             If va_solution is provided, only 'e' will be modeled and returned.
     :rtype: dict[str, gp.tupledict]
-    
-    Parameters from `case` dictionary:
-        S_ (int): The number of sections in the vertical alignment.
-        g_min (float): The minimum gradient value.
-        g_max (float): The maximum gradient value.
-        M1 (int): The starting section index for slope constraints.
-        S (int): The total number of sections.
-        M2 (int): The ending section index for slope constraints.
-        SIGMA (int): The maximum number of consecutive sections that can have a slope.
-        dg_max (float): The maximum allowable change in gradient between sections.
-        ALEPH1 (list): The elevation values at the beginning of the section.
-        ALEPH2 (list): The elevation values at the end of the section.
-
-    Variables created:
-        e (dict): Continuous variables representing elevation at each section index.
-        pi (dict): Binary variables indicating whether a section is part of a slope.
-        B_minus_s (dict): Binary variables for negative gradient range.
-        B_add_s (dict): Binary variables for positive gradient range.
-        g_minus_s (dict): Continuous variables for negative gradient values.
-        g_add_s (dict): Continuous variables for positive gradient values.
-        eth_minus_s (dict): Continuous variables for negative gradient auxiliary values.
-        eth_add_s (dict): Continuous variables for positive gradient auxiliary values.
-
-    Constraints added:
-        - Elevation constraint at the last section.
-        - Slope length constraints ensuring only one slope within a specified range.
-        - Slope gradient constraints separating positive and negative gradients.
-        - Gradient linear constraints limiting changes in gradient between sections.
-        - Platform constraints fixing elevation values at the beginning and end sections.
-        - Platform slope constraints setting slope indicators to zero for platform sections.
-
     """
-    # specify parameters
-    if case is None:
-        case = getattr(m, "case", None)
-        assert type(case) is dict, f"Input a 'VA_RBTC_OESD' model or provide 'case' parameter."
-    va_variables: dict | None = getattr(m, "va_variables", None)
-    
+    # >>>>>>>>>>>>>>>> parameters <<<<<<<<<<<<<<<<<<
     S_ = case["S_"]
     g_min, g_max = case["g_min"], case["g_max"]
+    e_min = min(case["P1"][1], case["P2"][1]) - g_max * S_ / 2
+    e_max = max(case["P1"][1], case["P2"][1]) + g_min * S_ / 2
     M1, S, M2, SIGMA = case["M1"], case["S"], case["M2"], case["SIGMA"]
     dg_max = case["dg_max"]
     ALEPH1, ALEPH2 = case["ALEPH1"], case["ALEPH2"]
 
-    # _va_variables
-    e = m.addVars(
-        range(1, S_ + 2), vtype=GRB.CONTINUOUS, name="e"
-    )  # extra index (S_+1) is to calculate w_{i, S_}
-    pi = m.addVars(range(1, S_ + 1), vtype=GRB.BINARY, name="pi")
-
-    # va solution mode
-    if va_solution is not None:
-        m.addConstrs(
-            (e[s] == va_solution[s] for s in range(1, S_ + 2)), name="va_solution:e"
-        )
-        if va_variables is not None:
-            va_variables["e"] = e
-        return {"e": e}
-
-    if e_floor:  # manually lift track elevations (lowest intervals)
-        m.addConstrs(
-            (e[s] >= e_floor for s in range(1, S_ + 2)), name=f"floor_lift")
-
-    # aux _va_variables for gradient range
-    B_minus_s = m.addVars(range(0, S_ + 1), vtype=GRB.BINARY, name="B_minus_s")
-    B_add_s = m.addVars(range(0, S_ + 1), vtype=GRB.BINARY, name="B_add_s")
-    g_minus_s = m.addVars(
-        range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=-g_max, ub=-g_min, name="g_minus_s"
-    )
-    g_add_s = m.addVars(
-        range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=g_min, ub=g_max, name="g_add_s"
-    )
-    eth_minus_s = m.addVars(
-        range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=-g_max, ub=0.0, name="eth_minus_s"
-    )
-    eth_add_s = m.addVars(
-        range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=0.0, ub=g_max, name="eth_add_s"
-    )
+    # >>>>>>>>>>>>>>>> variables <<<<<<<<<<<<<<<<<<
+    e           = m.addVars(range(1, S_ + 2), vtype=GRB.CONTINUOUS, lb=e_min, ub=e_max, name="e")
+    pi          = m.addVars(range(1, S_ + 1), vtype=GRB.BINARY, name="pi")
+    e_bar       = m.addVar(lb=e_min, ub=e_max, name="e_bar")  # lowest elevation
+    B_minus_s   = m.addVars(range(0, S_ + 1), vtype=GRB.BINARY, name="B_minus_s")
+    B_add_s     = m.addVars(range(0, S_ + 1), vtype=GRB.BINARY, name="B_add_s")
+    g_s         = m.addVars(range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=g_min, ub=g_max, name="g_s")
+    eth_minus_s = m.addVars(range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=0.0, ub=g_max, name="eth_minus_s")
+    eth_add_s   = m.addVars(range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=0.0, ub=g_max, name="eth_add_s")
 
     # >>>>>>>>> constraints <<<<<<<<<<
     # extra index for e_s
-    m.addConstr(
-        e[S_ + 1] == ALEPH2[S_] + ALEPH2[S_] - ALEPH2[S_ - 1], name="elevation_[S_+1]"
-    )
+    m.addConstr(e[S_ + 1] == ALEPH2[S_] + ALEPH2[S_] - ALEPH2[S_ - 1], name="elevation_[S_+1]")
     # slope length
     for i in range(M1, S + M1 - SIGMA + 3):
         m.addConstr(
@@ -118,37 +54,16 @@ def model_va(
     for s in range(M1, S + M1 + 2):
         # separate_grad_binary
         m.addConstr(B_minus_s[s] + B_add_s[s] == 1, name=f"separate_grad_binary[{s}]")
-
-        # linearize: B*g -> eth (use indicator constraint)
-        m.addConstr(
-            (B_minus_s[s] == 1) >> (eth_minus_s[s] == g_minus_s[s]),
-            name=f"ind_minus1[{s}]",
-        )
-        m.addConstr(
-            (B_minus_s[s] == 0) >> (eth_minus_s[s] == 0.0), name=f"ind_minus0[{s}]"
-        )
-
-        m.addConstr(
-            (B_add_s[s] == 1) >> (eth_add_s[s] == g_add_s[s]), name=f"ind_add1[{s}]"
-        )
-        m.addConstr((B_add_s[s] == 0) >> (eth_add_s[s] == 0.0), name=f"ind_add0[{s}]")
-
-        # gradient = eth_minus_s + eth_add_s
-        m.addConstr(
-            e[s + 1] - e[s] == eth_minus_s[s] + eth_add_s[s],
-            name=f"gradient_balance[{s}]",
-        )
-
-    # gradient_linear
-    for s in range(M1, S + M1 + 2):
-        m.addConstr(
-            e[s + 1] + e[s - 1] - 2 * e[s] <= dg_max * pi[s],
-            name=f"gradient_linear1[{s}]",
-        )
-        m.addConstr(
-            e[s + 1] + e[s - 1] - 2 * e[s] >= -dg_max * pi[s],
-            name=f"gradient_linear2[{s}]",
-        )
+        # linearize: eth_add_s = B_add_s * g_s  (McCormick)
+        m.addConstr(eth_add_s[s]/g_min >= B_add_s[s], name=f"mc_add_1[{s}]")
+        m.addConstr(eth_add_s[s]/g_max <= B_add_s[s], name=f"mc_add_2[{s}]")
+        m.addConstr(eth_add_s[s]/g_max >= g_s[s]/g_max - (1 - B_add_s[s]), name=f"mc_add_3[{s}]")
+        m.addConstr(eth_add_s[s]/g_min <= g_s[s]/g_min - (1 - B_add_s[s]), name=f"mc_add_4[{s}]")
+        # gradient: e_{s+1} - e_s = eth_add - eth_minus = 2*eth_add - g_s
+        m.addConstr(e[s + 1] - e[s] == 2 * eth_add_s[s] - g_s[s], name=f"gradient_balance[{s}]")
+        # gradient_linear
+        m.addConstr((e[s + 1] + e[s - 1] - 2 * e[s])/dg_max <= pi[s], name=f"gradient_linear1[{s}]")
+        m.addConstr((e[s + 1] + e[s - 1] - 2 * e[s])/dg_max >= -pi[s], name=f"gradient_linear2[{s}]")
     # platform
     for s in range(1, M1 + 1):
         m.addConstr(e[s] == ALEPH1[s], name=f"platform1[{s}]")
@@ -159,67 +74,61 @@ def model_va(
         m.addConstr(pi[s] == 0, name=f"platform_vpi1[{s}]")
     for s in range(S + M1 + 2, S_ + 1):
         m.addConstr(pi[s] == 0, name=f"platform_vpi2[{s}]")
+    # e_bar
+    m.addConstrs((e[s] >= e_bar for s in range(1, S_ + 2)), name="e_bar")
+
+    # va solution mode
+    if va_solution is not None:
+        m.addConstrs(
+            (e[s] == va_solution[s] for s in range(1, S_ + 2)), name="va_solution:e"
+        )
 
     # save them in _va_variables
     _va_variables = {}
     _va_variables["e"] = e
     _va_variables["pi"] = pi
+    _va_variables["e_bar"] = gp.tupledict({None: e_bar})
     _va_variables["B_minus_s"] = B_minus_s
     _va_variables["B_add_s"] = B_add_s
-    _va_variables["g_minus_s"] = g_minus_s
-    _va_variables["g_add_s"] = g_add_s
+    _va_variables["g_s"] = g_s
     _va_variables["eth_minus_s"] = eth_minus_s
     _va_variables["eth_add_s"] = eth_add_s
-    if va_variables is not None:
-        va_variables.update(_va_variables)
     
     return _va_variables
 
 
+
 def model_rbtc(
     m: gp.Model,
+    case: dict,
+    e: dict | gp.tupledict,
     l2r: bool = True,
-    nonlinear_t: bool = False,
-    case: dict | None = None,
-    e: dict | None = None,
-    # set_phi_b: bool = False
-) -> dict[str, gp.Var | gp.tupledict]:
+) -> dict[str, gp.tupledict]:
     """
-
     :param gp.Model m: the model instance
+    :param dict e: elevation variables
+    :param dict case: A dictionary containing case-specific parameters, used to create LC.
     :param bool, optional l2r: short for "left to right"
-    :param bool, optional nonlinear_t: use nonlinear expressions for variable t[s] with longer solving time;
-                                       if not, the model may be infeasible, but it could also solve faster.
-                                       default is False.       
-    :param dict, optional case: A dictionary containing case-specific parameters, used to create LC. If None, the
-                                case details from the model instance `m` will be used.
-    :param dict, optional e: elevation variables, default is None, if not provided, use `m.va_variables["e"]`
-    :param bool, optional set_phi_b: default False, if True, set phi_b to always be zero.
     :return: A dictionary containing the variables of the model, including energy, velocity, acceleration, force, and time.
 
             access with `f"L2R_{varname}"` or `f"R2L_{varname}"`, acceptable `varname` as below:
 
             [E_hat, v, a, f, b, f_max, b_max, gamma, t, E_s, R_s, Psi_t, phi_n, phi_b, w0, wi, wtn, T]
-    :rtype: dict[str, gp.Var | gp.tupledict]
+    :rtype: dict[str, gp.tupledict]
 
     """
-    if case is None:
-        case = getattr(m, "case", None)
-        assert case is not None, "case parameter is None, and m.case is also None."
-    va_variables: dict | None = getattr(m, "va_variables", None)
-
-    # define all the parameters
+    # parameters
     S_ = case["S_"]
     g = case["g"]
     train_mass, oesd_mass = (
-        case["train"].data["mass"] * 1000,
-        case["oesd"].data["mass"] * 1000,
+        case["train"].data["mass"],
+        case["oesd"].data["mass"],
     )
     total_mass = train_mass + oesd_mass
     rho = case["train"].data["rho"]
     M_f, M_b = (
-        case["train"].data["max_force"] * 1000,
-        case["train"].data["max_force"] * 1000,
+        case["train"].data["max_force"],
+        case["train"].data["max_force"],
     )
     r0, r1, r2 = (
         case["train"].data["davis_a"],
@@ -229,6 +138,7 @@ def model_rbtc(
     rtn = case["train"].data["r_tn"]
     a_max = case["train"].data["a_max"]
     v_max = case["train"].data["v_max"]
+    v_min = 1e-1
     eta_b = case["train"].data["eta_b"]
     eta_n = case["train"].data["eta_n"]
     force_ek_pwa = case["train"].data["pwa"]
@@ -236,143 +146,39 @@ def model_rbtc(
     one_over_v_ek_pwa = case["train"].data["pwa_1/v_E"]
     T_range = case["T_range"]
     ds = case["ds"]
-    mu = case["train"].data["mu"]
-
-    # previous va_variables
-    if va_variables is not None and e is None:
-        e = va_variables["e"]
-    assert isinstance(
-        e, (dict, gp.tupledict)
-    ), f"e should be either dict or tupledict, now is {type(e)}."
-
-    # prefix added to the names
+    mu = case["train"].data["mu"] / 1000
+    # resistance upper bounds in kN
+    _w0_ub = (r0 + r1 * v_max + r2 * v_max**2)
+    _wi_ub = case["g_max"] / ds * total_mass * g + 1e-2  # for precision issues
+    _wtn_ub = rtn * r2 * v_max**2
+    _phi_n_ub, _phi_b_ub = (M_f * ds + ds/v_min * mu) / eta_n, (M_f * ds + ds/v_min * mu) / eta_b
+    
     dir_prefix: str = "L2R_" if l2r else "R2L_"
 
-    # rbtc_variables
-    E_hat = m.addVars(
-        range(0, S_ + 1),
-        vtype=GRB.CONTINUOUS,
-        lb=0,
-        ub=v_max**2 / 2,
-        name=f"{dir_prefix}E_hat",
-    )
-    v = m.addVars(
-        range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=v_max, name=f"{dir_prefix}v"
-    )
-    for s in range(1, S_):  # for running intervals, add a small epsilon to lowerbound to avoid numerical issues
-        setattr(v[s], "LB", 1e-1)
-    
-    E_hat_times_2 = m.addVars(
-        range(0, S_ + 1),
-        vtype=GRB.CONTINUOUS,
-        lb=0,
-        ub=v_max**2,
-        name=f"{dir_prefix}E_hat_times_2",
-    )
-
-    a = m.addVars(
-        range(1, S_ + 1),
-        vtype=GRB.CONTINUOUS,
-        lb=-a_max,
-        ub=a_max,
-        name=f"{dir_prefix}a",
-    )
-    f = m.addVars(
-        range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=M_f, name=f"{dir_prefix}f"
-    )
-    b = m.addVars(
-        range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=M_b, name=f"{dir_prefix}b"
-    )
-    f_max = m.addVars(
-        range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=M_f, name=f"{dir_prefix}f_max"
-    )
-    b_max = m.addVars(
-        range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=M_b, name=f"{dir_prefix}b_max"
-    )
+    # variables
+    v     = m.addVars(range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=v_min, ub=v_max, name=f"{dir_prefix}v")  # m/s
+    v2    = m.addVars(range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=v_min**2, ub=v_max**2, name=f"{dir_prefix}v2")  # (m/s)^2
+    E_hat = m.addVars(range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=v_min**2/2, ub=v_max**2 / 2, name=f"{dir_prefix}E_hat")
+    a     = m.addVars(range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=-a_max, ub=a_max, name=f"{dir_prefix}a")
+    f     = m.addVars(range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=M_f, name=f"{dir_prefix}f")  # kN
+    b     = m.addVars(range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=M_b, name=f"{dir_prefix}b")  # kN
+    f_max = m.addVars(range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=M_f, name=f"{dir_prefix}f_max")  # kN
+    b_max = m.addVars(range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=M_b, name=f"{dir_prefix}b_max")  # kN
     gamma = m.addVars(range(1, S_ + 1), vtype=GRB.BINARY, name=f"{dir_prefix}gamma")
-
-    _t_lb = 0
-    _t_ub = T_range[1]
-
-    t = m.addVars(
-        range(1, S_ + 1),
-        vtype=GRB.CONTINUOUS,
-        lb=_t_lb,
-        ub=_t_ub,
-        name=f"{dir_prefix}t",
-    )
-
-    E_s = m.addVars(
-        range(1, S_ + 1),
-        vtype=GRB.CONTINUOUS,
-        lb=0,
-        ub=M_f * ds,
-        name=f"{dir_prefix}E_s",
-    )
-    R_s = m.addVars(
-        range(1, S_ + 1),
-        vtype=GRB.CONTINUOUS,
-        lb=0,
-        ub=M_b * ds / eta_b,
-        name=f"{dir_prefix}R_s",
-    )
-    _Psi_t_ub = _t_ub / (
-        2 * ds
-    ) 
-    _Psi_t_lb = 1 / v_max
-    Psi_t = m.addVars(
-        range(1, S_),
-        vtype=GRB.CONTINUOUS,
-        lb=_Psi_t_lb,
-        ub=_Psi_t_ub,
-        name=f"{dir_prefix}Psi_t",
-    )
-    _phi_n_ub, _phi_b_ub = (M_f * ds + _t_ub * mu) / eta_n, (
-        M_f * ds + _t_ub * mu
-    ) / eta_b
-    phi_n = m.addVars(
-        range(1, S_ + 1),
-        vtype=GRB.CONTINUOUS,
-        lb=0,
-        ub=_phi_n_ub,
-        name=f"{dir_prefix}phi_n",
-    )
-    phi_b = m.addVars(
-        range(1, S_ + 1),
-        vtype=GRB.CONTINUOUS,
-        lb=0,
-        ub=_phi_b_ub,
-        name=f"{dir_prefix}phi_b",
-    )
-    _w0_ub = (r0 + r1 * v_max + r2 * v_max**2) * 1000
-    w0 = m.addVars(
-        range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=_w0_ub, name=f"{dir_prefix}w0"
-    )
-    _wi_ub = case["g_max"] / ds * total_mass * g + 1e-2  # for precision issues
-    wi = m.addVars(
-        range(1, S_ + 1),
-        vtype=GRB.CONTINUOUS,
-        lb=-_wi_ub,
-        ub=_wi_ub,
-        name=f"{dir_prefix}wi",
-    )
-    _wtn_ub = rtn * r2 * v_max**2 * 1000
-    wtn = m.addVars(
-        range(1, S_ + 1),
-        vtype=GRB.CONTINUOUS,
-        lb=0,
-        ub=_wtn_ub,
-        name=f"{dir_prefix}wtn",
-    )
-    T = m.addVar(
-        vtype=GRB.CONTINUOUS, lb=T_range[0], ub=T_range[1], name=f"{dir_prefix}T"
-    )
-
-    # rbtc_constraints
+    t     = m.addVars(range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=ds/v_max, ub=ds/v_min, name=f"{dir_prefix}t") 
+    Psi_t = m.addVars(range(1, S_), vtype=GRB.CONTINUOUS, lb=1/v_max, ub=1/v_min, name=f"{dir_prefix}Psi_t")
+    phi_n = m.addVars(range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=_phi_n_ub, name=f"{dir_prefix}phi_n")  # kJ
+    phi_b = m.addVars(range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=_phi_b_ub, name=f"{dir_prefix}phi_b")  # kJ
+    w0    = m.addVars(range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=_w0_ub, name=f"{dir_prefix}w0")  # kN
+    wi    = m.addVars(range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=-_wi_ub, ub=_wi_ub, name=f"{dir_prefix}wi")  #kN
+    wtn   = m.addVars(range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=_wtn_ub, name=f"{dir_prefix}wtn")  # kN
+    T     = m.addVar(vtype=GRB.CONTINUOUS, lb=T_range[0], ub=T_range[1], name=f"{dir_prefix}T")  # s
+    
+    # constraints
     if l2r:
         # newton's law
         m.addConstrs(
-            (a[s] * ds == E_hat[s] - E_hat[s - 1] for s in range(1, S_ + 1)),
+            (2 * a[s] * ds == v2[s] - v2[s - 1] for s in range(1, S_ + 1)),
             name=f"{dir_prefix}2as",
         )
         m.addConstrs(
@@ -393,40 +199,36 @@ def model_rbtc(
         )
         m.addConstrs(
             (
-                w0[s] == 1000 * (r0 + r1 * v[s - 1] + 4 * r2 * E_hat[s - 1])
+                w0[s] == (r0 + r1 * v[s - 1] + r2 * v2[s - 1])
                 for s in range(1, S_ + 1)
             ),
             name=f"{dir_prefix}w0",
         )
         m.addConstrs(
-            (wtn[s] == 1000 * 4 * rtn * r2 * E_hat[s - 1] for s in range(1, S_ + 1)),
+            (wtn[s] == rtn * r2 * v2[s - 1] for s in range(1, S_ + 1)),
             name=f"{dir_prefix}wtn",
         )
 
-        # velocity to Ek
-        m.addConstrs(
-            (E_hat_times_2[s] == 2 * E_hat[s] for s in range(0, S_ + 1)),
-            name=f"{dir_prefix}E_hat_times2",
-        )
-        for s in range(0, S_ + 1):
-            m.addGenConstrPow(
-                E_hat_times_2[s], v[s], a=0.5, name=f"{dir_prefix}v=sqrt(2E_hat)[{s}]"
-            )
+        # velocity to v2 (relaxed version)
+        for s in range(0, S_+1):
+            m.addQConstr(v2[s] == v[s]**2)
 
+        m.addConstrs((E_hat[s] == v2[s] / 2 for s in range(0, S_ + 1)), name=f"{dir_prefix}E_hat")
+        
         # control forces ranges
         for s in range(1, S_ + 1):
             m.addGenConstrPWL(
                 E_hat[s - 1],
                 f_max[s],
                 force_ek_pwa[0],
-                force_ek_pwa[1],
+                [i/1000 for i in force_ek_pwa[1]],
                 name=f"{dir_prefix}force_ek_pwa[{s}]",
             )
             m.addGenConstrPWL(
                 E_hat[s - 1],
                 b_max[s],
                 force_ek_pwa[0],
-                force_ek_pwa[1],
+                [i/1000 for i in force_ek_pwa[1]],
                 name=f"{dir_prefix}brake_ek_pwa[{s}]",
             )
         m.addConstrs(
@@ -445,49 +247,38 @@ def model_rbtc(
 
         # energy
         m.addConstrs(
-            (E_s[s] == f[s] * ds + mu * t[s] for s in range(1, S_ + 1)),
-            name=f"{dir_prefix}E_s",
-        )
-        m.addConstrs(
-            (E_s[s] == eta_b * phi_b[s] + eta_n * phi_n[s] for s in range(1, S_ + 1)),
+            (f[s] * ds + mu * t[s] == eta_b * phi_b[s] + eta_n * phi_n[s] for s in range(1, S_ + 1)),
             name=f"{dir_prefix}eta",
         )
-        m.addConstrs(
-            (R_s[s] == b[s] * ds / eta_b for s in range(1, S_ + 1)),
-            name=f"{dir_prefix}R_s",
-        )
+        # m.addConstrs(
+        #     (R_s[s] * eta_b / ds == b[s] for s in range(1, S_ + 1)),
+        #     name=f"{dir_prefix}R_s",
+        # )
 
         # time related constraints
-        if nonlinear_t:
-            # nonlinear expressions (longer solving time)
-            for s in range(1, S_ + 1):
-                m.addQConstr(
-                    t[s] * v[s - 1] + t[s] * v[s] == 2 * ds,
-                    name=f"{dir_prefix}nonlinear_t[{s}]",
-                )
-        else:
-            # PWA expressions or gurobi embedded methods (might incur infeasibility)
-            for s in range(1, S_):
-                # m.addGenConstrPWL(E_hat[s], Psi_t[s], one_over_v_ek_pwa[0], one_over_v_ek_pwa[1], name=f"Psi_t[{s}]")
-                # Refer to https://www.gurobi.com/documentation/11.0/refman/funcpieces.html for option attributes.
-                m.addGenConstrPow(v[s], Psi_t[s], a=-1, name=f"{dir_prefix}Psi_t[{s}]")
-            m.addConstr(t[1] == 2 * ds * Psi_t[1], name=f"{dir_prefix}t[1]")
-            m.addConstr(t[S_] == 2 * ds * Psi_t[S_ - 1], name=f"{dir_prefix}t[{S_}]")
-            for s in range(2, S_):
-                m.addConstr(
-                    t[s] == ds / 2 * (Psi_t[s - 1] + Psi_t[s]),
-                    name=f"{dir_prefix}t[{s}]",
+        # PWA expressions or gurobi embedded methods (might incur infeasibility)
+        for s in range(1, S_):
+            # m.addGenConstrPWL(E_hat[s], Psi_t[s], one_over_v_ek_pwa[0], one_over_v_ek_pwa[1], name=f"Psi_t[{s}]")
+            # Refer to https://www.gurobi.com/documentation/11.0/refman/funcpieces.html for option attributes.
+            # m.addGenConstrPow(v[s], Psi_t[s], a=-1, name=f"{dir_prefix}Psi_t[{s}]")
+            m.addQConstr(v[s] * Psi_t[s] == 1, name=f"{dir_prefix}Psi_t[{s}]")
+        m.addConstr(t[1] == 2 * ds * Psi_t[1], name=f"{dir_prefix}t[1]")
+        m.addConstr(t[S_] == 2 * ds * Psi_t[S_ - 1], name=f"{dir_prefix}t[{S_}]")
+        for s in range(2, S_):
+            m.addConstr(
+                t[s] == ds / 2 * (Psi_t[s - 1] + Psi_t[s]),
+                name=f"{dir_prefix}t[{s}]",
                 )
         m.addConstr(T == t.sum(), name=f"{dir_prefix}T")
 
         # start and stop velocity
         for s in [0, S_]:
-            m.addConstr(E_hat[s] == 0, name=f"{dir_prefix}speed_limit[{s}]")
+            m.addConstr(v[s] == v_min, name=f"{dir_prefix}speed_limit[{s}]")
 
     else:  # right to left
         # newton's law
         m.addConstrs(
-            (a[s] * ds == E_hat[s - 1] - E_hat[s] for s in range(1, S_ + 1)),
+            (2 * a[s] * ds == v2[s - 1] - v2[s] for s in range(1, S_ + 1)),
             name=f"{dir_prefix}2as",
         )
         m.addConstrs(
@@ -508,25 +299,19 @@ def model_rbtc(
         )
         m.addConstrs(
             (
-                w0[s] == 1000 * (r0 + r1 * v[s] + 4 * r2 * E_hat[s])
+                w0[s] == (r0 + r1 * v[s] + r2 * v2[s])
                 for s in range(1, S_ + 1)
             ),
             name=f"{dir_prefix}w0",
         )
         m.addConstrs(
-            (wtn[s] == 1000 * 4 * rtn * r2 * E_hat[s] for s in range(1, S_ + 1)),
+            (wtn[s] == rtn * r2 * v2[s] for s in range(1, S_ + 1)),
             name=f"{dir_prefix}wtn",
         )
 
-        # velocity to Ek
-        m.addConstrs(
-            (E_hat_times_2[s] == 2 * E_hat[s] for s in range(0, S_ + 1)),
-            name=f"{dir_prefix}E_hat_times2",
-        )
-        for s in range(0, S_ + 1):
-            m.addGenConstrPow(
-                E_hat_times_2[s], v[s], a=0.5, name=f"{dir_prefix}v=sqrt(2E_hat)[{s}]"
-            )
+        # velocity to v2 (relaxed version)
+        for s in range(0, S_+1):
+            m.addQConstr(v2[s] == v[s]**2)
 
         # control forces ranges
         for s in range(1, S_ + 1):
@@ -534,14 +319,14 @@ def model_rbtc(
                 E_hat[s],
                 f_max[s],
                 force_ek_pwa[0],
-                force_ek_pwa[1],
+                [i/1000 for i in force_ek_pwa[1]],
                 name=f"{dir_prefix}force_ek_pwa[{s}]",
             )
             m.addGenConstrPWL(
                 E_hat[s],
                 b_max[s],
                 force_ek_pwa[0],
-                force_ek_pwa[1],
+                [i/1000 for i in force_ek_pwa[1]],
                 name=f"{dir_prefix}brake_ek_pwa[{s}]",
             )
         m.addConstrs(
@@ -560,22 +345,19 @@ def model_rbtc(
 
         # energy
         m.addConstrs(
-            (E_s[s] == f[s] * ds + mu * t[s] for s in range(1, S_ + 1)),
-            name=f"{dir_prefix}E_s",
-        )
-        m.addConstrs(
-            (E_s[s] == eta_b * phi_b[s] + eta_n * phi_n[s] for s in range(1, S_ + 1)),
+            (f[s] * ds + mu * t[s] == eta_b * phi_b[s] + eta_n * phi_n[s] for s in range(1, S_ + 1)),
             name=f"{dir_prefix}eta",
         )
-        m.addConstrs(
-            (R_s[s] == b[s] * ds / eta_b for s in range(1, S_ + 1)),
-            name=f"{dir_prefix}R_s",
-        )
+        # m.addConstrs(
+        #     (R_s[s] * eta_b / ds == b[s] for s in range(1, S_ + 1)),
+        #     name=f"{dir_prefix}R_s",
+        # )
 
         # time related constraints
         for s in range(1, S_):
             # model.addGenConstrPWL(E_hat[s], Psi_t[s], one_over_v_ek_pwa[0], one_over_v_ek_pwa[1], name=f"Psi_t[{s}]")
-            m.addGenConstrPow(v[s], Psi_t[s], a=-1, name=f"{dir_prefix}Psi_t[{s}]")
+            # m.addGenConstrPow(v[s], Psi_t[s], a=-1, name=f"{dir_prefix}Psi_t[{s}]")
+            m.addQConstr(v[s] * Psi_t[s] == 1, name=f"{dir_prefix}Psi_t[{s}]")
         m.addConstr(t[1] == 2 * ds * Psi_t[1], name=f"{dir_prefix}t[1]")
         m.addConstr(t[S_] == 2 * ds * Psi_t[S_ - 1], name=f"{dir_prefix}t[{S_}]")
         for s in range(2, S_):
@@ -586,13 +368,12 @@ def model_rbtc(
 
         # start and stop velocity
         for s in [0, S_]:
-            m.addConstr(E_hat[s] == 0, name=f"{dir_prefix}speed_limit_E_hat[{s}]")
-            m.addConstr(v[s] == 0, name=f"{dir_prefix}speed_limit_v[{s}]")
+            m.addConstr(v[s] == v_min, name=f"{dir_prefix}speed_limit_v[{s}]")
 
-    rbtc_variables: dict[str, gp.Var | gp.tupledict] = {}
+    rbtc_variables: dict[str, gp.tupledict] = {}
     rbtc_variables[f"{dir_prefix}E_hat"] = E_hat
     rbtc_variables[f"{dir_prefix}v"] = v
-    rbtc_variables[f"{dir_prefix}E_hat_times_2"] = E_hat_times_2
+    rbtc_variables[f"{dir_prefix}v2"] = v2
     rbtc_variables[f"{dir_prefix}a"] = a
     rbtc_variables[f"{dir_prefix}f"] = f
     rbtc_variables[f"{dir_prefix}b"] = b
@@ -600,37 +381,31 @@ def model_rbtc(
     rbtc_variables[f"{dir_prefix}b_max"] = b_max
     rbtc_variables[f"{dir_prefix}gamma"] = gamma
     rbtc_variables[f"{dir_prefix}t"] = t
-    rbtc_variables[f"{dir_prefix}E_s"] = E_s
-    rbtc_variables[f"{dir_prefix}R_s"] = R_s
     rbtc_variables[f"{dir_prefix}Psi_t"] = Psi_t
     rbtc_variables[f"{dir_prefix}phi_n"] = phi_n
     rbtc_variables[f"{dir_prefix}phi_b"] = phi_b
     rbtc_variables[f"{dir_prefix}w0"] = w0
     rbtc_variables[f"{dir_prefix}wi"] = wi
     rbtc_variables[f"{dir_prefix}wtn"] = wtn
-    rbtc_variables[f"{dir_prefix}T"] = T
-
-    model_rbtc_vars = getattr(m, "rbtc_variables", None)
-    if model_rbtc_vars is not None:
-        model_rbtc_vars.update(rbtc_variables)
-
+    rbtc_variables[f"{dir_prefix}t"] = t
+    rbtc_variables[f"{dir_prefix}T"] = gp.tupledict({None: T})
     return rbtc_variables
 
 
 def model_oesd(
     m: gp.Model,
+    case: dict,
+    rbtc_variables: dict,
     varpi_0: float = 1,
     l2r: bool = True,
-    case: dict | None = None,
-    rbtc_variables: dict | None = None,
 ) -> dict[str, gp.tupledict]:
     """model OESD
 
     :param gp.Model m: gurobi model
+    :param dict case: case data dictionary, is used when m is not a VA_RBTC_OESD model, defaults to None
+    :param dict rbtc_variables: RBTC variables dictionary, is used when m is not a VA_RBTC_OESD model, defaults to None
     :param float varpi_0: initial State-of-Energy, defaults to 1
     :param bool l2r: direction, short for left-to-right, defaults to True
-    :param dict | None case: case data dictionary, is used when m is not a VA_RBTC_OESD model, defaults to None
-    :param dict | None rbtc_variables: RBTC variables dictionary, is used when m is not a VA_RBTC_OESD model, defaults to None
     :return dict[str, gp.tupledict]: A dictionary containing the variables of the OESD model
 
             access with `f"L2R_{varname}"` or `f"R2L_{varname}"`, acceptable `varname` as below:
@@ -639,96 +414,76 @@ def model_oesd(
 
             [xi], when OESD type is None.
     """
-    if case is None:
-        case = getattr(m, "case", None)
-        assert type(case) == dict, f"case should be a dict, now {type(case)}."
-
-    if rbtc_variables is None:
-        rbtc_variables = getattr(m, "rbtc_variables", None)
-    assert (
-        rbtc_variables is not None and type(rbtc_variables) == dict
-    ), f"rbtc_variables should be a dict, now {type(rbtc_variables)}."
-
-    # define all the parameters
-    S_ = case["S_"]
-
-    # prefix added to the names
     dir_prefix: str = "L2R_" if l2r else "R2L_"
-
-    oesd_variables: dict[str, gp.tupledict] = {}
-
-    if case["oesd"].type is None:
-        # set xi to always be zero
-        xi = m.addVars(
-            range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=0, name=f"{dir_prefix}xi"
-        )
-        # set phi_b to always be zero
-        phi_b = rbtc_variables[f"{dir_prefix}phi_b"]
-        m.addConstrs(
-            (phi_b[s] == 0 for s in range(1, S_ + 1)), name=f"{dir_prefix}phi_b"
-        )
-
-        oesd_variables[f"{dir_prefix}xi"] = xi
-        if hasattr(m, "oesd_variables"):
-            m.oesd_variables.update(oesd_variables)
-        return oesd_variables
-
-    XI = case["oesd"].data["capacity"] * 1000 * 3600  # unit is J
-    ds = case["ds"]
-    a_max = case["train"].data["a_max"]
-
     # previously defined variables
-    phi_b = rbtc_variables[f"{dir_prefix}phi_b"]
+    phi_b = rbtc_variables[f"{dir_prefix}phi_b"]  # kJ
     t = rbtc_variables[f"{dir_prefix}t"]
-    R_s = rbtc_variables[f"{dir_prefix}R_s"]
-
-    # oesd variables
-    varpi = m.addVars(
-        range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=1, name=f"{dir_prefix}varpi"
-    )
-    _max_charge_power, _max_discharge_power = max(
-        case["oesd"].data["charge"]["y"]
-    ), max(case["oesd"].data["discharge"]["y"])
-    kappa_plus = m.addVars(
-        range(0, S_ + 1),
-        vtype=GRB.CONTINUOUS,
-        lb=0,
-        ub=_max_charge_power,
-        name=f"{dir_prefix}kappa_plus",
-    )
-    kappa_minus = m.addVars(
-        range(0, S_ + 1),
-        vtype=GRB.CONTINUOUS,
-        lb=0,
-        ub=_max_discharge_power,
-        name=f"{dir_prefix}kappa_minus",
-    )
+    b = rbtc_variables[f"{dir_prefix}b"]  # kN
+    
+    S_ = case["S_"]
+    if case["oesd"].type is None:
+        xi = m.addVars(range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=0, name=f"{dir_prefix}xi")  # kJ
+        m.addConstrs((phi_b[s] == 0 for s in range(1, S_ + 1)), name=f"{dir_prefix}phi_b")
+        return {f"{dir_prefix}xi": xi}
+    
+    # parameters
+    XI = case["oesd"].data["capacity"] * 3600  # kJ
+    ds = case["ds"]
+    eta_b = case["train"].data["eta_b"]
+    _max_charge_power = max(case["oesd"].data["charge"]["y"]) / 1000  # kW
+    _max_discharge_power = max(case["oesd"].data["discharge"]["y"]) / 1000  # kW
     _t_ub = case["T_range"][1] - ds * (S_ - 1) / case["train"].data["v_max"]
-    xi = m.addVars(
-        range(1, S_ + 1),
-        vtype=GRB.CONTINUOUS,
-        lb=0,
-        ub=_max_charge_power * _t_ub,
-        name=f"{dir_prefix}xi",
-    )
 
-    # oesd contraints
+    # variables
+    varpi = m.addVars(range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=100, name=f"{dir_prefix}varpi")  # (%)
+    kappa_plus = m.addVars(range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=_max_charge_power, name=f"{dir_prefix}kappa_plus")  # kW
+    kappa_minus = m.addVars(range(0, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=_max_discharge_power, name=f"{dir_prefix}kappa_minus")  # kW
+    xi = m.addVars(range(1, S_ + 1), vtype=GRB.CONTINUOUS, lb=0, ub=_max_charge_power * _t_ub, name=f"{dir_prefix}xi")  # kJ
+        
+    # contraints
     # (dis)charging power curve pwa
+    
+    # ============ original raw terms ==============
+    # for s in range(0, S_ + 1):
+    #     m.addGenConstrPWL(
+    #         varpi[s],
+    #         kappa_plus[s],
+    #         [i*100 for i in case["oesd"].data["charge"]["x"]],  # (%)
+    #         [i/1000 for i in case["oesd"].data["charge"]["y"]],  # kW
+    #         name=f"{dir_prefix}kappa_plus[{s}]",
+    #     )
+    #     m.addGenConstrPWL(
+    #         varpi[s],
+    #         kappa_minus[s],
+    #         [i*100 for i in case["oesd"].data["discharge"]["x"]],  # (%)
+    #         [i/1000 for i in case["oesd"].data["discharge"]["y"]],  # kW
+    #         name=f"{dir_prefix}kappa_minus[{s}]",
+    #     )
+    # ============ original raw terms ==============
+    
+    # =============== CONVEXITY the kappa terms ========== FIXME: 需要保证pwl曲线是开口向下的concave的，才能保证可松弛。
+    # Replace the entire PWL loop with:
     for s in range(0, S_ + 1):
-        m.addGenConstrPWL(
-            varpi[s],
-            kappa_plus[s],
-            case["oesd"].data["charge"]["x"],
-            case["oesd"].data["charge"]["y"],
-            name=f"{dir_prefix}kappa_plus[{s}]",
-        )
-        m.addGenConstrPWL(
-            varpi[s],
-            kappa_minus[s],
-            case["oesd"].data["discharge"]["x"],
-            case["oesd"].data["discharge"]["y"],
-            name=f"{dir_prefix}kappa_minus[{s}]",
-        )
+        # Charge power (concave) → linear upper envelope
+        xc = [i * 100 for i in case["oesd"].data["charge"]["x"]]
+        yc = [i / 1000 for i in case["oesd"].data["charge"]["y"]]
+        for k in range(len(xc) - 1):
+            slope = (yc[k+1] - yc[k]) / (xc[k+1] - xc[k])
+            m.addConstr(
+                kappa_plus[s] <= yc[k] + slope * (varpi[s] - xc[k]),
+                name=f"{dir_prefix}kappa_plus_seg{k}[{s}]",
+            )
+
+        # Discharge power (concave) → linear upper envelope
+        xd = [i * 100 for i in case["oesd"].data["discharge"]["x"]]
+        yd = [i / 1000 for i in case["oesd"].data["discharge"]["y"]]
+        for k in range(len(xd) - 1):
+            slope = (yd[k+1] - yd[k]) / (xd[k+1] - xd[k])
+            m.addConstr(
+                kappa_minus[s] <= yd[k] + slope * (varpi[s] - xd[k]),
+                name=f"{dir_prefix}kappa_minus_seg{k}[{s}]",
+            )
+    # =============== CONVEXITY the kappa terms ==========
 
     if l2r:
         for s in range(1, S_ + 1):
@@ -740,17 +495,17 @@ def model_oesd(
                 xi[s] <= kappa_plus[s - 1] * t[s], name=f"{dir_prefix}QConstr_xi[{s}]"
             )
         m.addConstrs(
-            (xi[s] <= R_s[s] for s in range(1, S_ + 1)), name=f"{dir_prefix}xi"
+            (xi[s] <= b[s] * ds * eta_b for s in range(1, S_ + 1)), name=f"{dir_prefix}xi"
         )
         m.addConstrs(
             (
-                varpi[s] == varpi[s - 1] + (xi[s] - phi_b[s]) / XI
+                varpi[s] == varpi[s - 1] + (xi[s] - phi_b[s]) / XI * 100
                 for s in range(1, S_ + 1)
             ),
             name=f"{dir_prefix}SOE_change",
         )
         m.addConstr(
-            varpi[0] == varpi_0, name=f"{dir_prefix}varpi_0"
+            varpi[0] == varpi_0*100, name=f"{dir_prefix}varpi_0"
         )  # SOE starting state
     else:
         for s in range(1, S_ + 1):
@@ -762,30 +517,26 @@ def model_oesd(
                 xi[s] <= kappa_plus[s] * t[s], name=f"{dir_prefix}QConstr_xi[{s}]"
             )
         m.addConstrs(
-            (xi[s] <= R_s[s] for s in range(1, S_ + 1)), name=f"{dir_prefix}xi"
+            (xi[s] <= b[s] * ds * eta_b for s in range(1, S_ + 1)), name=f"{dir_prefix}xi"
         )
         m.addConstrs(
             (
-                varpi[s - 1] == varpi[s] + (xi[s] - phi_b[s]) / XI
+                varpi[s - 1] == varpi[s] + (xi[s] - phi_b[s]) / XI * 100
                 for s in range(1, S_ + 1)
             ),
             name=f"{dir_prefix}SOE_change",
         )
         m.addConstr(
-            varpi[S_] == varpi_0, name=f"{dir_prefix}varpi_0"
+            varpi[S_] == varpi_0*100, name=f"{dir_prefix}varpi_0"
         )  # SOE starting state
 
-    # store them in oesd_variables
+    oesd_variables = {}
     oesd_variables[f"{dir_prefix}varpi"] = varpi
     oesd_variables[f"{dir_prefix}kappa_plus"] = kappa_plus
     oesd_variables[f"{dir_prefix}kappa_minus"] = kappa_minus
     oesd_variables[f"{dir_prefix}xi"] = xi
-
-    model_oesd_vars = getattr(m, "oesd_variables", None)
-    if type(model_oesd_vars) == dict:
-        model_oesd_vars.update(oesd_variables)
-
     return oesd_variables
+
 
 
 def solve_edge_va(case: dict, output_flag: int = 0, lowest_edge:bool=True) -> tuple[gp.Model, dict[int, float]]:
@@ -809,20 +560,23 @@ def solve_edge_va(case: dict, output_flag: int = 0, lowest_edge:bool=True) -> tu
     return m, e_lowest_dict
 
 
-def model_EC(m: gp.Model, case: dict | None = None, va_variables: dict | None = None, e_lowest_dict:dict|None=None):
+def get_energy_expr_one_direction(tc_vars: dict, oesd_vars: dict, prefix: str, is_oesd_included: bool) -> gp.LinExpr:
+    """Build energy objective. phi_n.sum() if not `is_oesd_included` else sum(phi_n + phi_b - xi)"""
+    expr = gp.LinExpr(0)
+    expr += tc_vars[f"{prefix}phi_n"].sum()
+    if is_oesd_included:
+        expr += tc_vars[f"{prefix}phi_b"].sum()
+        expr -= oesd_vars[f"{prefix}xi"].sum()
+    return expr
+
+
+def model_EC(m: gp.Model, case: dict, va_variables: dict, e_lowest_dict:dict|None=None):
     """Add Elevation-based Cuts to the model. (with LB, UB)
     
     BUG: will cut out feasible solutions, leading to infeasible warm start solutions.
     TEMP: add a big threshold 0.1m
     
     """
-    if case is None:
-        case = getattr(m, "case", None)
-        assert type(case) == dict, "case must be a dictionary"
-    if va_variables is None:
-        va_variables = getattr(m, "va_variables", None)
-        assert type(va_variables) == dict, "va_variables must be a dictionary"
-    
     # Elevation-based cuts: upper bound, connecting directly two platforms
     M1, S, M2 = case["M1"], case["S"], case["M2"]
     vi_e: dict = {i: 0 for i in range(M1 + 1, S + M1 + 1)}  # to be updated
@@ -851,17 +605,9 @@ def model_EC(m: gp.Model, case: dict | None = None, va_variables: dict | None = 
     return
 
 
-def model_SC(m: gp.Model, case: dict | None = None, va_variables: dict | None = None):
+def model_SC(m: gp.Model, case: dict, va_variables: dict):
     """Add Slope-based Cuts to the model. (with LB, UB)
     """
-    if case is None:
-        case = getattr(m, "case", None)
-        assert type(case) == dict, "case must be a dictionary"
-    
-    if va_variables is None:
-        va_variables = getattr(m, "va_variables", None)
-        assert type(va_variables) == dict, "va_variables must be a dictionary"
-    
     # the track should decends for first third and ascends for the last third, to fully utilize gravity
     M1, S, M2 = case["M1"], case["S"], case["M2"]
     _third = S // 3
@@ -881,16 +627,9 @@ def model_SC(m: gp.Model, case: dict | None = None, va_variables: dict | None = 
     return
 
 
-def model_TC(m: gp.Model, case: dict | None = None, rbtc_variables: dict | None = None, directions: tuple[bool, bool] | None = None):
+def model_TC(m: gp.Model, case: dict, rbtc_variables: dict, directions: tuple[bool, bool] | None = None):
     """Add Time-based Cuts to the model. (with LB, UB). `directions` is used when doing one-direction models
     """
-    if case is None:
-        case = getattr(m, "case", None)
-        assert type(case) == dict, "case must be a dictionary"
-    if rbtc_variables is None:
-        rbtc_variables = getattr(m, "rbtc_variables", None)
-        assert type(rbtc_variables) == dict, "rbtc_variables must be a dictionary"
-    
     case = case
     ds = case["ds"]
     v_max = case["train"].data["v_max"]
@@ -917,16 +656,10 @@ def model_TC(m: gp.Model, case: dict | None = None, rbtc_variables: dict | None 
     return
 
 
-def model_FC(m: gp.Model, case: dict | None = None, rbtc_variables: dict | None = None, directions: tuple[bool, bool] | None = None):
+
+def model_FC(m: gp.Model, case: dict, rbtc_variables: dict, directions: tuple[bool, bool] | None = None):
     """Add Force-based Cuts to the model. (with LB, UB). `directions` is used when doing one-direction models
     """
-    if case is None:
-        case = getattr(m, "case", None)
-        assert type(case) == dict, "case must be a dictionary"
-    if rbtc_variables is None:
-        rbtc_variables = getattr(m, "rbtc_variables", None)
-        assert type(rbtc_variables) == dict, "rbtc_variables must be a dictionary"
-    
     S_ = case["S_"]
     am = case['train'].data['a_max']
     ds = case['ds']
@@ -954,15 +687,9 @@ def model_FC(m: gp.Model, case: dict | None = None, rbtc_variables: dict | None 
     return
 
 
-def model_VC(m: gp.Model, case:dict | None = None, rbtc_variables: dict | None = None, directions: tuple[bool, bool] | None = None):
+def model_VC(m: gp.Model, case:dict, rbtc_variables: dict, directions: tuple[bool, bool] | None = None):
     """Add Velocity-based Cuts to the model. (with LB, UB). `directions` is used when doing one-direction models
     """
-    if case is None:
-        case = getattr(m, "case", None)
-        assert isinstance(case, dict), "case must be a dictionary"
-    if rbtc_variables is None:
-        rbtc_variables = getattr(m, "rbtc_variables", None)
-        assert isinstance(rbtc_variables, dict), "rbtc_variables must be a dictionary"
     directions = case['direction'] if directions is None else directions
 
     S_     = case["S_"]
@@ -1050,8 +777,8 @@ def model_VC(m: gp.Model, case:dict | None = None, rbtc_variables: dict | None =
 
 def model_MS(
     m: gp.Model,
-    case: dict | None = None,
-    rbtc_variables: dict | None = None,
+    case: dict,
+    rbtc_variables: dict,
     directions: tuple[bool, bool] | None = None,
     max_switches: int = 1,
     window_interval: int = 4,
@@ -1070,12 +797,6 @@ def model_MS(
     """
     assert window_interval >= 3, f"window_interval must be >= 3, but got {window_interval}"
     assert 0<max_switches<=window_interval-2, f"max_switches must be in (0, window_interval-2], but got {max_switches}"
-    if case is None:
-        case = getattr(m, "case", None)
-        assert isinstance(case, dict)
-    if rbtc_variables is None:
-        rbtc_variables = getattr(m, "rbtc_variables", None)
-        assert isinstance(rbtc_variables, dict)
     directions = case['direction'] if directions is None else directions
 
     S_ = case["S"]
@@ -1103,7 +824,7 @@ def model_MS(
         #         name=f"{dir_prefix}sw_limit_{start}"
         #     )
         
-        # z_s = min(gamma_s, gamma_{s-1})  -> this method does not introduce extra integer variables
+        # z_s = min(gamma_s, gamma_{s-1})
         z = {}
         for s in range(2, S_ + 1):
             z[s] = m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, ub=1.0, name=f"{dir_prefix}z_{s}")
@@ -1123,3 +844,99 @@ def model_MS(
 
     m.update()
 
+
+
+if __name__ == "__main__":
+    from src.prepare import get_case
+    import matplotlib.pyplot as plt
+    
+    m1 = gp.Model()
+    case = get_case(10030122)
+    S_ = case["S_"]
+    va_vars = model_va(m1, case=case, va_solution=None)
+    e = va_vars['e']
+    tc_vars = model_rbtc(m1, case=case, e=e)
+    es_vars = model_oesd(m1, case=case, rbtc_variables=tc_vars)
+    tc_vars2 = model_rbtc(m1, l2r=False, case=case, e=e)
+    es_vars2 = model_oesd(m1, l2r=False, case=case, rbtc_variables=tc_vars2)
+    
+    expr = gp.LinExpr(0)
+    expr += get_energy_expr_one_direction(tc_vars, es_vars, "L2R_", True)
+    expr += get_energy_expr_one_direction(tc_vars2, es_vars2, "R2L_", False)
+    m1.setObjective(expr, GRB.MINIMIZE)
+    
+    # m1.write("testing.lp")
+    
+    # m1.setParam(gp.GRB.Param.MIPGap, 0.01)
+    m1.setParam(gp.GRB.Param.TimeLimit, 60)
+    m1.optimize()
+    
+    l2r = True
+    dir_prefix = "L2R_"
+    e = np.array([va_vars['e'][i].x for i in va_vars['e'].keys()])
+    v = np.array([tc_vars[f'{dir_prefix}v'][i].x for i in tc_vars[f'{dir_prefix}v'].keys()])
+    f = np.array([tc_vars[f'{dir_prefix}f'][i].x for i in tc_vars[f'{dir_prefix}f'].keys()])
+    b = np.array([tc_vars[f'{dir_prefix}b'][i].x for i in tc_vars[f'{dir_prefix}b'].keys()])
+    t = np.array([tc_vars[f'{dir_prefix}t'][i].x for i in tc_vars[f'{dir_prefix}t'].keys()])
+    cumsum_t = np.cumsum(t)
+    phi_n = np.array(
+        [tc_vars[f'{dir_prefix}phi_n'][i].x for i in tc_vars[f'{dir_prefix}phi_n'].keys()])
+    phi_b = np.array(
+        [tc_vars[f'{dir_prefix}phi_b'][i].x for i in tc_vars[f'{dir_prefix}phi_b'].keys()])
+    xi = np.array([es_vars[f'{dir_prefix}xi'][i].x for i in es_vars[f'{dir_prefix}xi'].keys()])
+    varpi = np.array(
+        [es_vars[f'{dir_prefix}varpi'][i].x for i in es_vars[f'{dir_prefix}varpi'].keys()])
+    R_s = np.array([tc_vars[f'{dir_prefix}R_s'][i].x for i in tc_vars[f'{dir_prefix}R_s'].keys()])
+
+
+    fig, axes = plt.subplots(4, 1, figsize=(5, 10))
+    # first subplot: elevation (1,S_) and speed (0,S_)
+    ax_e = axes[0]
+    ax_v = ax_e.twinx()
+    ele = ax_e.plot(range(1, S_ + 1), e[:-1], "ro-", label="Track elevation")
+    vel = ax_v.plot([i + 0.5 for i in range(0, S_ + 1)], v, "b-", label="Speed")
+    ax_e.set_ylabel("Track Elevation (m)")
+    ax_e.set_ylim((e[0] - 30, e[0] + 5))
+    ax_v.set_ylabel("Speed (m/s)")
+    lines = ele + vel
+    ax_e.legend(lines, [ll.get_label() for ll in lines])
+
+    # second subplot: control forces and times
+    ax_f = axes[1]
+    ax_t = ax_f.twinx()
+    tra = ax_f.plot(range(1, S_ + 1), f, "rx-", label="Traction force")
+    bra = ax_f.plot(range(1, S_ + 1), -b, "bx-", label="Braking force")
+    # control = ax_f.plot(range(1, S_ + 1), (f - b) / 1000, "rx-", label="Control force")
+    ax_f.axhline(0, color="grey", alpha=0.3, linestyle=":")
+    ax_f.set_ylabel("Force (kN)")
+    cumsum_t = cumsum_t if l2r else cumsum_t[::-1]
+    cst = ax_t.plot(range(1, S_ + 1), cumsum_t, color="grey", ls="-", label="Cumulative time")
+    ax_t.set_ylabel("Time (s)")
+    lines = tra + bra + cst
+    ax_f.legend(lines, [ll.get_label() for ll in lines])
+
+    # third subplot: (dis)charge
+    ax_energy = axes[2]
+    # ax_soe = ax_energy.twinx()
+    ax_energy.set_ylabel("Energy consumption (kWh)")
+    ln = ax_energy.plot(range(1, S_ + 1), phi_n / 3600, color="#8ECFC9", marker="", ls="-",
+                        label="Energy discharged from Net")
+    lo = ax_energy.plot(range(1, S_ + 1), phi_b / 3600, color="#FFBF7A", marker="", ls="-",
+                        label="Energy discharged from OESD")
+    lx = ax_energy.plot(range(1, S_ + 1), xi / 3600, color="#FA7F6F", ls="-", marker="",
+                        label="Energy charged to OESD")
+    lines = ln + lo + lx
+    ax_energy.legend(lines, [ll.get_label() for ll in lines])
+
+    # fourth subplot: SOE
+    ax_soe = axes[3]
+    ls = ax_soe.plot([i + 0.5 for i in range(0, S_ + 1)], varpi, color="#82B0D2", marker="x", ls="-",
+                     label="State of Energy (SOE)")
+    ax_soe.set_ylim([-5, 105])
+    ax_soe.set_ylabel("State of Energy (%)")
+    ax_soe.set_xlabel("Intervals")
+    ax_soe.legend()
+
+    fig = plt.gcf()
+    plt.tight_layout()
+    plt.show()

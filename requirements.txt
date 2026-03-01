@@ -1,0 +1,8 @@
+python=3.12
+gurobi=12.0.1
+gurobi_logtools=4.0.0
+pandas=2.1.1
+numpy=1.26.0
+ipywidgets
+ipykernel
+matplotlib

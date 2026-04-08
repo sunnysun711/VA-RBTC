@@ -198,8 +198,10 @@ class FullModel(gp.Model):
         opt_depth: bool = False,
         energy_cap: float | None = None,
         depth_cap: float | None = None,
+        cyclic: bool | float | int = False,
+        power_time_trapezoid: bool = False,
     ):
-        """
+        r"""
         Build the optimization model for vertical alignment, regenerative braking train control, and onboard energy storage devices.
 
         This method sets up the objective function and constraints for the VA-RBTC-OESD optimization model, with options for enabling or disabling
@@ -218,16 +220,30 @@ class FullModel(gp.Model):
                                Enable it with `energy_cap` provided will make the model optimize *only* the depth of the VA curve with at most `energy_cap` energy consumption.
                                Enable it with `pareto_alpha` provided will make the model optimize *both* the depth of the VA curve and energy consumption.
         :param float | None energy_cap: Optional. If provided, sets an upper bound on the total energy consumption. Default is None.
+        :param bool | float | int cyclic: Optional. Whether to apply cyclic soe condition, defaults to False.
+            if True: varpi_end = varpi_start = varpi_0
+            if False: no constraint
+            if float | int: varpi_end \in [varpi_0 - cyclic, varpi_0 + cyclic]
         :return: None
         """
         # ===== build core models =====
         self._va_variables.update(model_va(m=self, case=self._case, va_solution=va_solution))
         if self._case['direction'][0]:
-            self._rbtc_variables.update(model_rbtc(self, case=self._case, e=self._va_variables['e'], l2r=True))
-            self._oesd_variables.update(model_oesd(self, case=self._case, rbtc_variables=self._rbtc_variables, varpi_0=self._case["varpi_0"], l2r=True))
+            self._rbtc_variables.update(
+                model_rbtc(self, case=self._case, e=self._va_variables['e'], l2r=True)
+            )
+            self._oesd_variables.update(
+                model_oesd(
+                    self, case=self._case, rbtc_variables=self._rbtc_variables, varpi_0=self._case["varpi_0"], 
+                    l2r=True, cyclic=cyclic, power_time_trapezoid=power_time_trapezoid)
+            )
         if self._case['direction'][1]:
             self._rbtc_variables.update(model_rbtc(self, case=self._case, e=self._va_variables['e'], l2r=False))
-            self._oesd_variables.update(model_oesd(self, case=self._case, rbtc_variables=self._rbtc_variables, varpi_0=self._case["varpi_0"], l2r=False))
+            self._oesd_variables.update(
+                model_oesd(
+                    self, case=self._case, rbtc_variables=self._rbtc_variables, varpi_0=self._case["varpi_0"], 
+                    l2r=False, cyclic=cyclic, power_time_trapezoid=power_time_trapezoid)
+            )
         
         # ===== add logic cuts =====
         if EC_on: model_EC(self, case=self._case, va_variables=self._va_variables)
@@ -236,6 +252,7 @@ class FullModel(gp.Model):
         if FC_on: model_FC(self, case=self._case, rbtc_variables=self._rbtc_variables, directions=self._case['direction'])
         if VC_on: model_VC(self, case=self._case, rbtc_variables=self._rbtc_variables, directions=self._case['direction'])
         if MS_on: model_MS(self, case=self._case, rbtc_variables=self._rbtc_variables, directions=self._case['direction'])
+        self.update()
         
         # ===== configure obj and cap constraints =====
         self.reconfigure(is_oesd_included=is_oesd_included, opt_depth=opt_depth, depth_cap=depth_cap, energy_cap=energy_cap)
@@ -426,21 +443,28 @@ class FullModel(gp.Model):
         )
 
 if __name__ == "__main__":
-    case_id = 10030222
+    case_id = 10010124
     
-    # ===== 第一次求解，保存解 =====
-    fm1 = FullModel(case_id, save_dir=f"{case_id}")
-    fm1.build(depth_cap=3.0)
+    fm1 = FullModel(case_id, save_dir=f"{case_id}/rectangle")
+    fm1.build(
+        depth_cap=2.0,
+        TC_on=True,
+        VC_on=True,
+        MS_on=True,
+        EC_on=True,
+        FC_on=False,
+        SC_on=False,
+        cyclic=True,
+        power_time_trapezoid=False,
+    )
     sol = fm1.get_sequential_solution()
-    print(sol.obj_depth, sol.obj_energy)
+    # print(sol.obj_depth, sol.obj_energy)
     fm1.inject_warm_start(sol, binary_only=False, debug_mode=False, use_hint=True)
-    fm1.optimize_(save_on=True, TimeLimit=30)
+    fm1.optimize_(save_on=True, TimeLimit=1200, Heuristics=0.7, MIPFocus=1, MIPGap=0.01)
 
-    # solution = Solution.from_model(fm1)  # 提取解
-
-    # # ===== 第二次求解，用上次的解做热启动 =====
-    fm1.reconfigure(depth_cap=6.0)
-    fm1.optimize_(save_on=True, TimeLimit=30)
+    # solution = Solution.from_model(fm1)
+    # fm1.reconfigure(depth_cap=6.0)
+    # fm1.optimize_(save_on=True, TimeLimit=30)
     
     
     pass

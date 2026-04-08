@@ -11,6 +11,18 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import matplotlib
+params = {
+    "font.family": "serif",
+    "font.serif": ["Times New Roman", "DejaVu Serif"],
+    "mathtext.fontset": "stix",  
+    "axes.labelsize": 10,
+    "axes.titlesize": 10,
+    "legend.fontsize": 10,
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+}
+matplotlib.rcParams.update(params)
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -30,6 +42,13 @@ class ParetoConfig:
     time_limit_per_point: float = 120.0
     mip_gap: float = 0.05
     is_oesd_included: bool = True
+    TC_on: bool = True  # valid inequalities proofed
+    VC_on: bool = True  # valid inequalities proofed
+    MS_on: bool = True  # valid inequalities proofed
+    EC_on: bool = True  # valid inequalities proofed
+    SC_on: bool = False # heuristic accelerators
+    FC_on: bool = False # heuristic accelerators
+    cyclic: bool = True
 
 
 @dataclass
@@ -76,11 +95,17 @@ def pareto_sweep(
 
     log_info(f"[Pareto] depth ∈ [{depth_min:.3f}, {depth_max:.3f}] m, {cfg.n_points} points")
 
-    # ===== 单次 build =====
     fm = FullModel(case_id, save_dir=save_dir)
     fm.build(
-        depth_cap=depth_caps[0],
+        TC_on=cfg.TC_on,  # valid inequalities proofed
+        VC_on=cfg.VC_on,  # valid inequalities proofed
+        MS_on=cfg.MS_on,  # valid inequalities proofed
+        EC_on=cfg.EC_on,  # valid inequalities proofed
+        SC_on=cfg.SC_on, # heuristic accelerators
+        FC_on=cfg.FC_on,  # heuristic accelerators
         is_oesd_included=cfg.is_oesd_included,
+        depth_cap=depth_caps[0],
+        cyclic=cfg.cyclic,
     )
 
     results: list[ParetoPoint] = []
@@ -91,7 +116,7 @@ def pareto_sweep(
         log_info(f"\n{'='*60}")
         log_info(f"[Pareto] Step {i}/{cfg.n_points - 1}:  depth_cap = {d_cap:.4f} m")
 
-        # ===== reconfigure（首步已在 build 中配好，跳过） =====
+        # ===== reconfigure =====
         if i > 0:
             fm.reconfigure(
                 depth_cap=d_cap,
@@ -234,64 +259,73 @@ def plot_pareto_with_gaps(
     figsize: tuple = (5, 4),
 ):
     """
-    Pareto plot where each solution is a vertical bar [ObjBound, ObjVal].
+    Pareto plot where each solution is a bar from [ObjBound @ depth_cap] to [ObjVal @ depth].
 
-    - Top of bar   = incumbent (ObjVal, current best feasible)
-    - Bottom of bar = ObjBound (proven lower bound from MIP solver)
-    - Bar height    = absolute gap → shorter = tighter = more confidence
-    - Red line      = Pareto front through incumbents (conservative)
-    - Blue dashed   = Pareto front through bounds (optimistic best-case)
-    - Purple shade  = gap region between the two fronts
+    Preprocessing:
+      1. Sort points by depth_cap ascending.
+      2. Reverse-cummax on energy_bound → monotonic outer approximation.
+      3. Raw bounds kept for scatter dots; corrected bounds for outer front line.
+      4. Gap bars are diagonal: (depth_cap, bound) → (depth, incumbent).
     """
     scale = 3600.0 if energy_unit == "kWh" else 1.0
 
-    front = filter_non_dominated(points)
-    front_bound = filter_non_dominated_bound(points) if show_bound_front else []
+    # ── 0. Sort by depth_cap ──
+    pts_sorted = sorted(points, key=lambda p: p.depth_cap)
+
+    # ── 1. Reverse cummax on energy_bound → valid outer approximation ──
+    raw_bounds = np.array([p.energy_bound for p in pts_sorted])
+    corrected_bounds = raw_bounds.copy()
+    running_max = -np.inf
+    for i in range(len(corrected_bounds) - 1, -1, -1):
+        running_max = max(running_max, corrected_bounds[i])
+        corrected_bounds[i] = running_max
+
+    # ── 2. Inner Pareto front (incumbent, non-dominated) ──
+    front = filter_non_dominated(pts_sorted)
 
     fig, ax = plt.subplots(figsize=figsize)
 
-    depths_all = [p.depth for p in points]
-    bar_width = (max(depths_all) - min(depths_all)) / len(points) * 0.35
+    depths_all   = [p.depth     for p in pts_sorted]
+    dcaps_all    = [p.depth_cap for p in pts_sorted]
+    bw = (max(depths_all) - min(depths_all)) / len(pts_sorted) * 0.35
 
-    # ── 1. Gap bars (vertical segments with caps) ──
-    for pt in points:
-        e_lo = pt.energy_bound / scale
+    # ── 3. Gap bars: diagonal (depth_cap, bound) → (depth, incumbent) ──
+    for idx, pt in enumerate(pts_sorted):
+        e_lo = corrected_bounds[idx] / scale
         e_hi = pt.energy / scale
-        color = "#B0B0B0"
-        ax.plot([pt.depth, pt.depth], [e_lo, e_hi],
-                color=color, linewidth=2.5, solid_capstyle="round", zorder=2)
-        for e_end in (e_lo, e_hi):
-            ax.plot([pt.depth - bar_width / 2, pt.depth + bar_width / 2], [e_end, e_end],
-                    color=color, linewidth=1.2, zorder=2)
+        label = "Solve pair" if idx == len(pts_sorted) - 1 else None
+        ax.plot([pt.depth_cap, pt.depth], [e_lo, e_hi],
+                color="#B0B0B0", linewidth=1.2, solid_capstyle="round",
+                zorder=2, label=label)
 
-    # ── 2. Incumbent dots (top) ──
-    ax.scatter(depths_all, [p.energy / scale for p in points],
+    # ── 4. Incumbent dots (at depth) ──
+    ax.scatter(depths_all, [p.energy / scale for p in pts_sorted],
                c="white", s=30, edgecolors="#555555", linewidths=0.8,
-               zorder=4, label="Incumbent (ObjVal)")
+               zorder=4, label="Incumbent")
 
-    # ── 3. Bound dots (bottom) ──
-    ax.scatter(depths_all, [p.energy_bound / scale for p in points],
+    # ── 5. Bound dots (raw bounds, at depth_cap) ──
+    ax.scatter(dcaps_all, raw_bounds / scale,
                c="white", s=18, edgecolors="#AAAAAA", linewidths=0.6,
-               marker="v", zorder=4, label="Lower bound (ObjBound)")
+               marker="v", zorder=4, label="Lower Bound")
 
-    # ── 4. Pareto front (incumbent) ──
+    # ── 6. Pareto front – inner approximation (incumbent) ──
     if front:
         ax.plot([p.depth for p in front], [p.energy / scale for p in front],
                 "o-", color="#E74C3C", ms=5, linewidth=1.5,
-                zorder=5, label="Pareto front (incumbent)")
+                zorder=5, label="Pareto (Inner approx.)")
 
-    # ── 5. Pareto front (bound, optimistic) ──
-    if front_bound and show_bound_front:
-        ax.plot([p.depth for p in front_bound], [p.energy_bound / scale for p in front_bound],
+    # ── 7. Pareto front – outer approximation (corrected bounds) ──
+    if show_bound_front:
+        ax.plot(dcaps_all, corrected_bounds / scale,
                 "v--", color="#3498DB", ms=4, linewidth=1.2,
-                zorder=5, label="Pareto front (bound)")
+                zorder=5, label="Pareto (Outer approx.)")
 
-    # ── 6. Gap region shade between the two fronts ──
-    if front and front_bound and show_bound_front:
+    # ── 8. Gap region shade ──
+    if front and show_bound_front:
         d_inc = np.array([p.depth for p in front])
         e_inc = np.array([p.energy / scale for p in front])
-        d_bnd = np.array([p.depth for p in front_bound])
-        e_bnd = np.array([p.energy_bound / scale for p in front_bound])
+        d_bnd = np.array(dcaps_all)
+        e_bnd = corrected_bounds / scale
 
         d_common = np.sort(np.unique(np.concatenate([d_inc, d_bnd])))
         e_inc_interp = np.interp(d_common, d_inc, e_inc)
@@ -299,12 +333,12 @@ def plot_pareto_with_gaps(
 
         ax.fill_between(d_common, e_bnd_interp, e_inc_interp,
                         alpha=0.10, color="#9B59B6", zorder=1,
-                        label="Optimality gap region")
+                        label="Gap region")
 
     ax.set_xlabel("Alignment Depth (m)")
     ax.set_ylabel(f"Energy Consumption ({energy_unit})")
     ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.2)
+    ax.grid(True, linestyle="--", alpha=0.2)
     fig.tight_layout()
 
     if save_path:
@@ -317,6 +351,25 @@ def plot_pareto_with_gaps(
 # ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    for case_id in [10030022, 10030023, 10030024, 10030025, 10030026]:
-        cfg = ParetoConfig(n_points=20, time_limit_per_point=1200, mip_gap=0.01)
-        results = pareto_sweep(case_id, cfg=cfg, save_dir=f"pareto_convex/{case_id}", Heuristics=0.7, MIPFocus=1)
+    for case_id in [
+        # 10000022, 10000023, 10000024, 10000025, 10000026,
+        # 10010022, 10010023, 10010024, 10010025, 10010026,
+        # 10020022, 10020023, 10020024, 10020025, 10020026,
+        # 10030022, 10030023, 10030024, 10030025, 10030026,
+        # 10040022, 10040023, 10040024, 10040025, 10040026,
+        
+        10000024
+    ]:
+        cfg = ParetoConfig(
+            n_points=20, 
+            time_limit_per_point=15, 
+            mip_gap=0.01,
+            TC_on=False,
+            VC_on=False,
+            MS_on=False,
+            EC_on=True,
+            SC_on=False,
+            FC_on=False,
+            cyclic=True,
+        )
+        results = pareto_sweep(case_id, cfg=cfg, save_dir=f"pareto_test/{case_id}", Heuristics=0.7, MIPFocus=1)

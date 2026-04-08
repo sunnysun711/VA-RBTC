@@ -5,6 +5,8 @@ from gurobipy import GRB
 import numpy as np
 
 
+V_MIN = 1e-1  # consistent with RBTC start/stop speed
+
 def model_va(
     m: gp.Model,
     case: dict,
@@ -138,7 +140,7 @@ def model_rbtc(
     rtn = case["train"].data["r_tn"]
     a_max = case["train"].data["a_max"]
     v_max = case["train"].data["v_max"]
-    v_min = 1e-1
+    v_min = V_MIN
     eta_b = case["train"].data["eta_b"]
     eta_n = case["train"].data["eta_n"]
     force_ek_pwa = case["train"].data["pwa"]
@@ -250,10 +252,6 @@ def model_rbtc(
             (f[s] * ds + mu * t[s] == eta_b * phi_b[s] + eta_n * phi_n[s] for s in range(1, S_ + 1)),
             name=f"{dir_prefix}eta",
         )
-        # m.addConstrs(
-        #     (R_s[s] * eta_b / ds == b[s] for s in range(1, S_ + 1)),
-        #     name=f"{dir_prefix}R_s",
-        # )
 
         # time related constraints
         # PWA expressions or gurobi embedded methods (might incur infeasibility)
@@ -348,10 +346,6 @@ def model_rbtc(
             (f[s] * ds + mu * t[s] == eta_b * phi_b[s] + eta_n * phi_n[s] for s in range(1, S_ + 1)),
             name=f"{dir_prefix}eta",
         )
-        # m.addConstrs(
-        #     (R_s[s] * eta_b / ds == b[s] for s in range(1, S_ + 1)),
-        #     name=f"{dir_prefix}R_s",
-        # )
 
         # time related constraints
         for s in range(1, S_):
@@ -398,14 +392,28 @@ def model_oesd(
     rbtc_variables: dict,
     varpi_0: float = 1,
     l2r: bool = True,
+    cyclic: bool | float | int = False,
+    convexify : bool = True,
+    power_time_trapezoid: bool = False,
 ) -> dict[str, gp.tupledict]:
-    """model OESD
+    r"""model OESD
 
     :param gp.Model m: gurobi model
     :param dict case: case data dictionary, is used when m is not a VA_RBTC_OESD model, defaults to None
     :param dict rbtc_variables: RBTC variables dictionary, is used when m is not a VA_RBTC_OESD model, defaults to None
     :param float varpi_0: initial State-of-Energy, defaults to 1
     :param bool l2r: direction, short for left-to-right, defaults to True
+    :param bool | float | int cyclic: whether to apply cyclic soe condition, defaults to False
+        if True: varpi_end = varpi_start = varpi_0
+        if False: no constraint
+        if float or int: varpi_end \in [varpi_0-cyclic, varpi_0 + cyclic] (the result range must be between 0 and 1)
+    :param bool convexify: whether to apply convexification to the soe-power function, defaults to True.
+    :param bool power_time_trapezoid: whether to apply power time trapezoid constraint, defaults to False
+        if False: phi_b[s] <= kappa_minus[s] * t[s]  # Rectangle
+                  xi[s] <= kappa_plus[s] * t[s]  # Rectangle
+        if True: phi_b[s] <= (kappa_minus[s] + kappa_minus[s-1]) * t[s] / 2  # Trapezoid
+                 xi[s] <= (kappa_plus[s] + kappa_plus[s-1]) * t[s] / 2  # Trapezoid
+        
     :return dict[str, gp.tupledict]: A dictionary containing the variables of the OESD model
 
             access with `f"L2R_{varname}"` or `f"R2L_{varname}"`, acceptable `varname` as below:
@@ -443,57 +451,54 @@ def model_oesd(
     # contraints
     # (dis)charging power curve pwa
     
-    # ============ original raw terms ==============
-    # for s in range(0, S_ + 1):
-    #     m.addGenConstrPWL(
-    #         varpi[s],
-    #         kappa_plus[s],
-    #         [i*100 for i in case["oesd"].data["charge"]["x"]],  # (%)
-    #         [i/1000 for i in case["oesd"].data["charge"]["y"]],  # kW
-    #         name=f"{dir_prefix}kappa_plus[{s}]",
-    #     )
-    #     m.addGenConstrPWL(
-    #         varpi[s],
-    #         kappa_minus[s],
-    #         [i*100 for i in case["oesd"].data["discharge"]["x"]],  # (%)
-    #         [i/1000 for i in case["oesd"].data["discharge"]["y"]],  # kW
-    #         name=f"{dir_prefix}kappa_minus[{s}]",
-    #     )
-    # ============ original raw terms ==============
-    
-    # =============== CONVEXITY the kappa terms ========== FIXME: 需要保证pwl曲线是开口向下的concave的，才能保证可松弛。
-    # Replace the entire PWL loop with:
-    for s in range(0, S_ + 1):
-        # Charge power (concave) → linear upper envelope
-        xc = [i * 100 for i in case["oesd"].data["charge"]["x"]]
-        yc = [i / 1000 for i in case["oesd"].data["charge"]["y"]]
-        for k in range(len(xc) - 1):
-            slope = (yc[k+1] - yc[k]) / (xc[k+1] - xc[k])
-            m.addConstr(
-                kappa_plus[s] <= yc[k] + slope * (varpi[s] - xc[k]),
-                name=f"{dir_prefix}kappa_plus_seg{k}[{s}]",
+    if not convexify:  # PWL
+        for s in range(0, S_ + 1):
+            m.addGenConstrPWL(
+                varpi[s],
+                kappa_plus[s],
+                [i*100 for i in case["oesd"].data["charge"]["x"]],  # (%)
+                [i/1000 for i in case["oesd"].data["charge"]["y"]],  # kW
+                name=f"{dir_prefix}kappa_plus[{s}]",
             )
+            m.addGenConstrPWL(
+                varpi[s],
+                kappa_minus[s],
+                [i*100 for i in case["oesd"].data["discharge"]["x"]],  # (%)
+                [i/1000 for i in case["oesd"].data["discharge"]["y"]],  # kW
+                name=f"{dir_prefix}kappa_minus[{s}]",
+            )
+    else:  # Convex reformulation
+        # NOTE: 需要保证pwl曲线是开口向下的concave的，才能保证可松弛。
+        # Replace the entire PWL loop with:
+        for s in range(0, S_ + 1):
+            # Charge power (concave) → linear upper envelope
+            xc = [i * 100 for i in case["oesd"].data["charge"]["x"]]
+            yc = [i / 1000 for i in case["oesd"].data["charge"]["y"]]
+            for k in range(len(xc) - 1):
+                slope = (yc[k+1] - yc[k]) / (xc[k+1] - xc[k])
+                m.addConstr(
+                    kappa_plus[s] <= yc[k] + slope * (varpi[s] - xc[k]),
+                    name=f"{dir_prefix}kappa_plus_seg{k}[{s}]",
+                )
 
-        # Discharge power (concave) → linear upper envelope
-        xd = [i * 100 for i in case["oesd"].data["discharge"]["x"]]
-        yd = [i / 1000 for i in case["oesd"].data["discharge"]["y"]]
-        for k in range(len(xd) - 1):
-            slope = (yd[k+1] - yd[k]) / (xd[k+1] - xd[k])
-            m.addConstr(
-                kappa_minus[s] <= yd[k] + slope * (varpi[s] - xd[k]),
-                name=f"{dir_prefix}kappa_minus_seg{k}[{s}]",
-            )
-    # =============== CONVEXITY the kappa terms ==========
+            # Discharge power (concave) → linear upper envelope
+            xd = [i * 100 for i in case["oesd"].data["discharge"]["x"]]
+            yd = [i / 1000 for i in case["oesd"].data["discharge"]["y"]]
+            for k in range(len(xd) - 1):
+                slope = (yd[k+1] - yd[k]) / (xd[k+1] - xd[k])
+                m.addConstr(
+                    kappa_minus[s] <= yd[k] + slope * (varpi[s] - xd[k]),
+                    name=f"{dir_prefix}kappa_minus_seg{k}[{s}]",
+                )
 
     if l2r:
         for s in range(1, S_ + 1):
-            m.addQConstr(
-                phi_b[s] <= kappa_minus[s - 1] * t[s],
-                name=f"{dir_prefix}QConstr_phi_b[{s}]",
-            )
-            m.addQConstr(
-                xi[s] <= kappa_plus[s - 1] * t[s], name=f"{dir_prefix}QConstr_xi[{s}]"
-            )
+            if power_time_trapezoid:
+                m.addQConstr(2 * phi_b[s] <= (kappa_minus[s-1] + kappa_minus[s]) * t[s], name=f"{dir_prefix}QConstr_phi_b[{s}]")
+                m.addQConstr(2 * xi[s] <= (kappa_plus[s-1] + kappa_plus[s]) * t[s], name=f"{dir_prefix}QConstr_xi[{s}]")
+            else:
+                m.addQConstr(phi_b[s] <= kappa_minus[s-1] * t[s], name=f"{dir_prefix}QConstr_phi_b[{s}]")
+                m.addQConstr(xi[s] <= kappa_plus[s-1] * t[s], name=f"{dir_prefix}QConstr_xi[{s}]")
         m.addConstrs(
             (xi[s] <= b[s] * ds * eta_b for s in range(1, S_ + 1)), name=f"{dir_prefix}xi"
         )
@@ -507,15 +512,30 @@ def model_oesd(
         m.addConstr(
             varpi[0] == varpi_0*100, name=f"{dir_prefix}varpi_0"
         )  # SOE starting state
+        
+        # optional for cyclic soe condition
+        if isinstance(cyclic, bool):
+            if cyclic:
+                m.addConstr(varpi[S_] == varpi_0*100, name=f"{dir_prefix}varpi_S_1")
+        elif isinstance(cyclic, (float, int)):
+            assert varpi_0 * 100 - cyclic >= 0, f"cyclic={cyclic} is too large for varpi_0={varpi_0}"
+            assert varpi_0 * 100 + cyclic <= 100, f"cyclic={cyclic} is too large for varpi_0={varpi_0}"
+            m.addConstr(
+                varpi[S_] >= varpi_0 * 100 - cyclic, 
+                name=f"{dir_prefix}varpi_S_1"
+            )
+            m.addConstr(
+                varpi[S_] <= varpi_0 * 100 + cyclic, 
+                name=f"{dir_prefix}varpi_S_2"
+            )
     else:
         for s in range(1, S_ + 1):
-            m.addQConstr(
-                phi_b[s] <= kappa_minus[s] * t[s],
-                name=f"{dir_prefix}QConstr_phi_b[{s}]",
-            )
-            m.addQConstr(
-                xi[s] <= kappa_plus[s] * t[s], name=f"{dir_prefix}QConstr_xi[{s}]"
-            )
+            if power_time_trapezoid:
+                m.addQConstr(2 * phi_b[s] <= (kappa_minus[s] + kappa_minus[s-1]) * t[s], name=f"{dir_prefix}QConstr_phi_b[{s}]")
+                m.addQConstr(2 * xi[s] <= (kappa_plus[s] + kappa_plus[s-1]) * t[s], name=f"{dir_prefix}QConstr_xi[{s}]")
+            else:
+                m.addQConstr(phi_b[s] <= kappa_minus[s] * t[s], name=f"{dir_prefix}QConstr_phi_b[{s}]")
+                m.addQConstr(xi[s] <= kappa_plus[s] * t[s], name=f"{dir_prefix}QConstr_xi[{s}]")
         m.addConstrs(
             (xi[s] <= b[s] * ds * eta_b for s in range(1, S_ + 1)), name=f"{dir_prefix}xi"
         )
@@ -529,6 +549,22 @@ def model_oesd(
         m.addConstr(
             varpi[S_] == varpi_0*100, name=f"{dir_prefix}varpi_0"
         )  # SOE starting state
+        
+        # optional for cyclic soe condition
+        if isinstance(cyclic, bool):
+            if cyclic:
+                m.addConstr(varpi[0] == varpi_0*100, name=f"{dir_prefix}varpi_S_1")
+        elif isinstance(cyclic, (float, int)):
+            assert varpi_0 * 100 - cyclic >= 0, f"cyclic={cyclic} is too large for varpi_0={varpi_0}"
+            assert varpi_0 * 100 + cyclic <= 100, f"cyclic={cyclic} is too large for varpi_0={varpi_0}"
+            m.addConstr(
+                varpi[0] >= varpi_0*100 - cyclic, 
+                name=f"{dir_prefix}varpi_S_1"
+            )
+            m.addConstr(
+                varpi[0] <= varpi_0*100 + cyclic, 
+                name=f"{dir_prefix}varpi_S_2"
+            )
 
     oesd_variables = {}
     oesd_variables[f"{dir_prefix}varpi"] = varpi
@@ -571,12 +607,7 @@ def get_energy_expr_one_direction(tc_vars: dict, oesd_vars: dict, prefix: str, i
 
 
 def model_EC(m: gp.Model, case: dict, va_variables: dict, e_lowest_dict:dict|None=None):
-    """Add Elevation-based Cuts to the model. (with LB, UB)
-    
-    BUG: will cut out feasible solutions, leading to infeasible warm start solutions.
-    TEMP: add a big threshold 0.1m
-    
-    """
+    """Add Elevation-based Cuts to the model. (with LB, UB)"""
     # Elevation-based cuts: upper bound, connecting directly two platforms
     M1, S, M2 = case["M1"], case["S"], case["M2"]
     vi_e: dict = {i: 0 for i in range(M1 + 1, S + M1 + 1)}  # to be updated
@@ -585,24 +616,184 @@ def model_EC(m: gp.Model, case: dict, va_variables: dict, e_lowest_dict:dict|Non
     for i in range(M1 + 1, S + M1 + 1):
         vi_e[i] = grad * case["ds"] * (i - M1) + left_e
         va_variables["e"][i].setAttr("UB", vi_e[i])  # section elevation-based cuts
-        
-    # Elevation-based cuts: lower bound, solve a quick model to minimize elevations
-    LC_threshold = 0.1  # TEMP FIX
-    
-    if e_lowest_dict is None:
-        temp_model, lower_e_LC = solve_edge_va(case, output_flag=0, lowest_edge=True)
-        # temp_model, upper_e_LC = solve_edge_va(m.case, output_flag=0, lowest_edge=False)
-        temp_model.dispose()  # clear cache
-    else:
-        lower_e_LC = e_lowest_dict
-    
-    S_ = case["S_"]
-    for i in range(1, S_ + 1):
-        # va_variables["e"][i].setAttr("LB", lower_e_LC[i] - LC_threshold)  # will override va_lb_pairs in model_va.
-        m.addConstr(va_variables["e"][i] >= lower_e_LC[i] - LC_threshold, name=f"EC_LB_{i}")
-        # va_variables["e"][i].setAttr("UB", upper_e_LC[i])
-    
     return
+
+def _bang_bang_sweep(S_: int, ds: float, v_min: float, v_max: float, a_max: float):
+    """Forward/backward bang-bang time-optimal sweep in O(S_).
+ 
+    Returns (t_fwd, t_bwd, v_fwd, v_bwd), each np.ndarray of shape (S_+1,).
+      - t_fwd[i]: min time from node 0 (v_min) to node i
+      - t_bwd[i]: min time from node i to node S_ (v_min)
+      - v_fwd[i]: max reachable speed at node i from the left
+      - v_bwd[i]: max reachable speed at node i from the right
+    """
+    n = S_ + 1
+    t_fwd = np.zeros(n)
+    v_fwd = np.zeros(n)
+    v_fwd[0] = v_min
+ 
+    for i in range(S_):
+        v_fwd[i + 1] = min((v_fwd[i] ** 2 + 2 * a_max * ds) ** 0.5, v_max)
+        t_fwd[i + 1] = t_fwd[i] + 2 * ds / (v_fwd[i] + v_fwd[i + 1])
+ 
+    t_bwd = np.zeros(n)
+    v_bwd = np.zeros(n)
+    v_bwd[S_] = v_min
+ 
+    for i in range(S_ - 1, -1, -1):
+        v_bwd[i] = min((v_bwd[i + 1] ** 2 + 2 * a_max * ds) ** 0.5, v_max)
+        t_bwd[i] = t_bwd[i + 1] + 2 * ds / (v_bwd[i] + v_bwd[i + 1])
+ 
+    return t_fwd, t_bwd, v_fwd, v_bwd
+
+def model_TC(m: gp.Model, case: dict, rbtc_variables: dict, directions: tuple[bool, bool] | None = None):
+    """Add Time-based Cuts (LB & UB). UB tightened per-interval via
+    bang-bang sweep: t_ub[s] = T_max - t_fwd[s-1] - t_bwd[s].
+    """
+    ds    = case["ds"]
+    v_max = case["train"].data["v_max"]
+    v_min = V_MIN
+    a_max = case["train"].data["a_max"]
+    Tm    = case["T_range"][1]
+    S_    = case["S_"]
+ 
+    _t_lb = ds / v_max
+    t_fwd, t_bwd, _, _ = _bang_bang_sweep(S_, ds, v_min, v_max, a_max)
+    t_ubs = np.maximum(Tm - t_fwd[:-1] - t_bwd[1:], _t_lb)
+ 
+    directions = case['direction'] if directions is None else directions
+    if directions[0]:
+        for s in range(1, S_ + 1):
+            rbtc_variables["L2R_t"][s].setAttr("LB", _t_lb)
+            rbtc_variables["L2R_t"][s].setAttr("UB", t_ubs[s - 1])
+    if directions[1]:
+        for s in range(1, S_ + 1):
+            rbtc_variables["R2L_t"][s].setAttr("LB", _t_lb)
+            rbtc_variables["R2L_t"][s].setAttr("UB", t_ubs[s - 1])
+    
+    window_lens = [i for i in range(2, S_//2 + 1)]
+    for w in window_lens:
+        if w < 2 or w > S_:
+            continue
+        for s in range(1, S_ - w + 2):          # s = 1 … S_-w+1
+            # segments in window: s, s+1, …, s+w-1
+            # outside-window minimum time:
+            #   t_fwd[s-1]   = min time for segments 1 … s-1
+            #   t_bwd[s+w-1] = min time for segments s+w … S_
+            win_ub = max(Tm - t_fwd[s - 1] - t_bwd[s + w - 1],
+                         w * _t_lb)
+
+            if directions[0]:
+                lhs = gp.quicksum(rbtc_variables["L2R_t"][s + k]
+                                  for k in range(w))
+                m.addConstr(lhs <= win_ub,
+                            name=f"TC_win_L2R_w{w}_s{s}")
+            if directions[1]:
+                lhs = gp.quicksum(rbtc_variables["R2L_t"][s + k]
+                                  for k in range(w))
+                m.addConstr(lhs <= win_ub,
+                            name=f"TC_win_R2L_w{w}_s{s}")
+    return
+
+def model_VC(m: gp.Model, case: dict, rbtc_variables: dict,
+             directions: tuple[bool, bool] | None = None):
+    """Add Velocity-based Cuts (VC) to the model. (with addConstr). `directions` is used when doing one-direction models
+
+    Uses bang-bang sweep for time-budget computation and Cauchy-Schwarz
+    for the RHS lower bound.  Window widths grow geometrically to keep
+    cut count at O(S log S).
+    """
+    directions = case['direction'] if directions is None else directions
+
+    S_    = case["S_"]
+    ds    = case["ds"]
+    v_max = case["train"].data["v_max"]
+    v_min = V_MIN
+    a_max = case["train"].data["a_max"]
+    T_max = case["T_range"][1]
+
+    # ---- precompute bang-bang reachability (O(S)) ----
+    t_fwd, t_bwd, v_fwd, v_bwd = _bang_bang_sweep(S_, ds, v_min, v_max, a_max)
+    v_ub = np.minimum(v_fwd, v_bwd)  # per-node velocity UB from bang-bang reachability
+
+    # ---- geometric window widths: 1, 2, 4, 8, ... < S/2 ----
+    window_lens: list[int] = []
+    w = 1
+    while w < S_ // 2:
+        window_lens.append(w)
+        w *= 2
+
+    def _add_for_dir(prefix: str):
+        v = rbtc_variables[f"{prefix}v"]
+        
+        for s in range(S_ + 1):
+            v[s].setAttr("UB", v_ub[s])
+            # m.addConstr(v[s] <= v_ub[s], name=f"{prefix}vc_ub[{s}]")
+
+        for W in window_lens:
+            for s in range(1, S_ - W + 2):
+                # Window covers intervals [s, s+W-1], boundary nodes s-1 and s+W-1.
+                # Time budget = T_max - min_time(0→node s-1) - min_time(node s+W-1→S_)
+                t_bar_win = T_max - t_fwd[s - 1] - t_bwd[s + W - 1]
+                if t_bar_win <= 0:
+                    continue
+
+                # Cauchy-Schwarz: Σ(v_{j-1}+v_j) ≥ 2·W²·Δs / T_W
+                rhs = 2.0 * W * W * ds / t_bar_win
+
+                expr = gp.LinExpr()
+                for j in range(s, s + W):
+                    expr += v[j - 1] + v[j]
+                m.addConstr(expr >= rhs, name=f"{prefix}vc_W{W}[{s}]")
+
+    if directions[0]:
+        _add_for_dir("L2R_")
+    if directions[1]:
+        _add_for_dir("R2L_")
+    return
+
+def model_MS(
+    m: gp.Model,
+    case: dict,
+    rbtc_variables: dict,
+    directions: tuple[bool, bool] | None = None,
+):
+    """
+    Add Mode-Switching Cuts (MS) that enforce monotonic traction-to-braking
+    transition within each travel direction:
+
+        L2R:  gamma_s <= gamma_{s-1}   (decreases along travel direction)
+        R2L:  gamma_{s-1} <= gamma_s   (increases along travel direction)
+
+    :param gp.Model m: gurobipy Model
+    :param dict case: problem data dict
+    :param dict rbtc_variables: dict containing gamma binaries for each direction
+    :param tuple[bool, bool] | None directions: (include L2R, include R2L)
+    """
+    directions = case["direction"] if directions is None else directions
+    S_ = case["S"]
+
+    for dir_prefix, l2r in [("L2R_", True), ("R2L_", False)]:
+        if not directions[0 if l2r else 1]:
+            continue
+
+        gamma = rbtc_variables[f"{dir_prefix}gamma"]
+
+        for s in range(2, S_ + 1):
+            if l2r:
+                # L2R: train travels s=1->S, traction first then braking
+                m.addConstr(
+                    gamma[s] <= gamma[s - 1],
+                    name=f"{dir_prefix}MS_{s}",
+                )
+            else:
+                # R2L: train travels s=S->1, traction at high s, braking at low s
+                m.addConstr(
+                    gamma[s - 1] <= gamma[s],
+                    name=f"{dir_prefix}MS_{s}",
+                )
+
+    m.update()
 
 
 def model_SC(m: gp.Model, case: dict, va_variables: dict):
@@ -625,36 +816,6 @@ def model_SC(m: gp.Model, case: dict, va_variables: dict):
         va_variables["B_add_s"][s].setAttr("UB", 1)
     
     return
-
-
-def model_TC(m: gp.Model, case: dict, rbtc_variables: dict, directions: tuple[bool, bool] | None = None):
-    """Add Time-based Cuts to the model. (with LB, UB). `directions` is used when doing one-direction models
-    """
-    case = case
-    ds = case["ds"]
-    v_max = case["train"].data["v_max"]
-    Tm = case["T_range"][1]
-    S_ = case["S_"]
-    
-    # >>> interval time-based cuts implemented here
-    # >>> the time to pass the current interval with v_max.
-    _t_lb = ds / v_max  # otherwise would be zero
-    # >>> the time to pass the current interval when passing all other intervals with v_max.
-    _t_ub = Tm - ds * (S_ - 1) / v_max  # otherwise would be a very large number (T_max).
-    
-    directions = case['direction'] if directions is None else directions
-    if directions[0]:
-        dir_prefix = "L2R_"
-        for s in range(1, S_ + 1):
-            rbtc_variables[f"{dir_prefix}t"][s].setAttr("LB", _t_lb)
-            rbtc_variables[f"{dir_prefix}t"][s].setAttr("UB", _t_ub)
-    if directions[1]:
-        dir_prefix = "R2L_"
-        for s in range(1, S_ + 1):
-            rbtc_variables[f"{dir_prefix}t"][s].setAttr("LB", _t_lb)
-            rbtc_variables[f"{dir_prefix}t"][s].setAttr("UB", _t_ub)
-    return
-
 
 
 def model_FC(m: gp.Model, case: dict, rbtc_variables: dict, directions: tuple[bool, bool] | None = None):
@@ -685,165 +846,6 @@ def model_FC(m: gp.Model, case: dict, rbtc_variables: dict, directions: tuple[bo
             rbtc_variables["R2L_gamma"][s].setAttr("UB", 1)  # fixed to 1, no deceleration
     
     return
-
-
-def model_VC(m: gp.Model, case:dict, rbtc_variables: dict, directions: tuple[bool, bool] | None = None):
-    """Add Velocity-based Cuts to the model. (with LB, UB). `directions` is used when doing one-direction models
-    """
-    directions = case['direction'] if directions is None else directions
-
-    S_     = case["S_"]
-    ds     = case["ds"]
-    v_max  = case["train"].data["v_max"]
-    a_max  = case["train"].data["a_max"]
-    T_max  = case["T_range"][1]
-    L      = S_ * ds
-    window_lens: list[int] = [1,2,4,8]  # number of intervals to consider together for a mean speed calculation
-    
-    # ---- helper: minimal time to traverse a segment of length d with endpoints (v0 -> v1),
-    #      under |a|<=a_max, v<=v_max, time-optimal bang-bang (accelerate/cruise/decel).
-    #      Closed-form, no decision vars involved.
-    def t_min_segment(d: float, v0: float, v1: float) -> float:
-        # try to reach v_max; distances for accel/decel
-        if v0 < v_max:
-            da = (v_max**2 - v0**2) / (2 * a_max)
-        else:
-            da = 0.0
-        if v1 < v_max:
-            dd = (v_max**2 - v1**2) / (2 * a_max)
-        else:
-            dd = 0.0
-
-        if d >= da + dd:
-            # accel to v_max, cruise, decel
-            t = (max(v_max - v0, 0.0)) / a_max \
-                + (max(v_max - v1, 0.0)) / a_max \
-                + (d - da - dd) / v_max
-            return t
-        else:
-            # triangular (no cruise): peak speed v_peak <= v_max
-            # distance = (v_peak^2 - v0^2)/(2 a_max) + (v_peak^2 - v1^2)/(2 a_max) = d
-            v_peak_sq = a_max * d + 0.5 * (v0**2 + v1**2)
-            v_peak = (v_peak_sq ** 0.5)
-            # ensure not exceeding v_max due to numerics; if > v_max, fallback to the previous branch (shouldn't happen)
-            if v_peak > v_max + 1e-9:
-                # tiny safeguard
-                return (max(v_max - v0, 0.0)) / a_max + (max(v_max - v1, 0.0)) / a_max + max(d - da - dd, 0.0) / v_max
-            return max(v_peak - v0, 0.0) / a_max + max(v_peak - v1, 0.0) / a_max
-
-    # ---- helper: compute tight window time upper bound as a constant
-    # window [s, s+W-1] uses nodes [s-1 .. s+W-1]
-    def t_bar_window_const(s: int, W: int) -> float:
-        xL = (s - 1) * ds                 # left boundary position
-        xR = (s + W - 1) * ds             # right boundary position
-        d_left  = xL                      # distance from start (0) to left boundary
-        d_right = L - xR                  # distance from right boundary to end (L)
-
-        # max feasible boundary speeds given distances to ends (start/end at rest)
-        v_left_max  = min(v_max, (2 * a_max * d_left) ** 0.5)
-        v_right_max = min(v_max, (2 * a_max * d_right) ** 0.5)
-
-        # minimal time outside the window:
-        #   left outside: 0 -> v_left_max over distance d_left
-        #   right outside: v_right_max -> 0 over distance d_right
-        t_left  = t_min_segment(d_left,  0.0,          v_left_max)
-        t_right = t_min_segment(d_right, v_right_max,  0.0)
-
-        # the remaining time budget for the window
-        t_bar = T_max - (t_left + t_right)
-        # it should be > 0; if not, this means T_max itself is too tight for such a window (shouldn't happen in normal setups)
-        return t_bar
-
-    def _add_for_dir(prefix: str):
-        v = rbtc_variables[f"{prefix}v"]
-
-        # tight sliding-window cuts using t_bar_window
-        for W in window_lens:
-            for s in range(1, S_ - W + 2):
-                t_bar_win = t_bar_window_const(s, W)
-                if t_bar_win <= 0:
-                    # skip degenerate windows
-                    continue
-                rhsW = 2.0 * W * ds / t_bar_win
-                expr = gp.LinExpr()
-                for j in range(s, s + W):
-                    expr += v[j - 1] + v[j]
-                m.addConstr(expr >= rhsW, name=f"{prefix}vc_tight_W{W}[{s}]")
-    if directions[0]:
-        _add_for_dir("L2R_")
-    if directions[1]:
-        _add_for_dir("R2L_")
-    return
-
-def model_MS(
-    m: gp.Model,
-    case: dict,
-    rbtc_variables: dict,
-    directions: tuple[bool, bool] | None = None,
-    max_switches: int = 1,
-    window_interval: int = 4,
-):
-    """
-    Add Mode-Switching Cuts to reduce unrealistic frequent switching 
-    between traction and braking modes.
-    Each window of consecutive intervals is limited by `max_switches`.
-
-    :param gp.Model m: gurobipy Model
-    :param dict | None case: problem data dict
-    :param dict | None rbtc_variables: dict containing gamma binaries for each direction
-    :param tuple[bool, bool] | None directions: tuple of booleans (include L2R, include R2L)
-    :param int max_switches: maximum allowed switches in a window
-    :param int window_interval: window length for switching cut
-    """
-    assert window_interval >= 3, f"window_interval must be >= 3, but got {window_interval}"
-    assert 0<max_switches<=window_interval-2, f"max_switches must be in (0, window_interval-2], but got {max_switches}"
-    directions = case['direction'] if directions is None else directions
-
-    S_ = case["S"]
-
-    for dir_prefix, l2r in [("L2R_", True), ("R2L_", False)]:
-        if not directions[(0 if l2r else 1)]:
-            continue
-
-        gamma = rbtc_variables[f"{dir_prefix}gamma"]
-
-        # # switching indicators: sw_s = |gamma_s - gamma_{s-1}|
-        # sw = {}
-        # for s in range(2, S_ + 1):
-        #     sw[s] = m.addVar(
-        #         vtype=GRB.BINARY, name=f"{dir_prefix}sw_{s}"
-        #     )
-        #     m.addConstr(sw[s] >= gamma[s] - gamma[s - 1])
-        #     m.addConstr(sw[s] >= gamma[s - 1] - gamma[s])
-
-        # # add cuts on switching within a sliding window
-        # for start in range(2, S_ - window_interval + 2):
-        #     m.addConstr(
-        #         gp.quicksum(sw[s] for s in range(start, start + window_interval - 1))
-        #         <= max_switches,
-        #         name=f"{dir_prefix}sw_limit_{start}"
-        #     )
-        
-        # z_s = min(gamma_s, gamma_{s-1})
-        z = {}
-        for s in range(2, S_ + 1):
-            z[s] = m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, ub=1.0, name=f"{dir_prefix}z_{s}")
-            m.addConstr(z[s] <= gamma[s], name=f"{dir_prefix}z_le_g_{s}")
-            m.addConstr(z[s] <= gamma[s - 1], name=f"{dir_prefix}z_le_gm1_{s}")
-            m.addConstr(z[s] >= gamma[s] + gamma[s - 1] - 1.0, name=f"{dir_prefix}z_ge_sum-1_{s}")
-
-        # add cuts on switching within a sliding window
-        for start in range(2, S_ - window_interval + 2):
-            # sum_{s=start}^{start+W-2} |gamma_s - gamma_{s-1}| <= max_switches
-            m.addConstr(
-                gp.quicksum((gamma[s] + gamma[s - 1] - 2.0 * z[s])
-                            for s in range(start, start + window_interval - 1))
-                <= max_switches,
-                name=f"{dir_prefix}sw_limit_{start}"
-            )
-
-    m.update()
-
 
 
 if __name__ == "__main__":
